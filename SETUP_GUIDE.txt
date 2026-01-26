@@ -1,0 +1,106 @@
+CODEX CONTAINER - QUICK SETUP GUIDE
+====================================
+
+Your isolated Docker environment for OpenAI Codex is ready!
+
+WHAT'S INCLUDED:
+----------------
+✓ Alpine Linux-based Docker container
+✓ Node.js and npm pre-installed
+✓ Workspace mounting capability
+✓ Configuration persistence
+✓ User ID mapping for file permissions
+✓ Bash wrapper script with full functionality
+✓ Docker Compose support
+✓ Non-root user with sudo access
+
+INSTALLATION:
+-------------
+1. Extract the archive to your Docker projects directory:
+   cd ~/codeWS/Docker
+   tar -xzf codex-container.tar.gz
+   cd codex-container
+
+2. Make the wrapper executable (already done in archive):
+   chmod +x codex-container
+
+3. Build the container:
+   ./codex-container --build
+
+USAGE EXAMPLES:
+---------------
+# Run in current directory
+./codex-container
+
+# Open interactive shell
+./codex-container --shell
+
+# Mount specific workspace
+./codex-container -w /path/to/your/project --shell
+
+# Install npm packages globally (persisted)
+./codex-container --npm install -g @openai/codex
+
+# Run Node.js scripts
+./codex-container --node yourscript.js
+
+# Set OpenAI API key
+./codex-container -e OPENAI_API_KEY=sk-your-key --shell
+
+# Check status
+./codex-container --status
+
+OPTIONAL - SYSTEM-WIDE INSTALLATION:
+-------------------------------------
+To use from anywhere:
+sudo ln -s $(pwd)/codex-container /usr/local/bin/
+
+Then you can just run:
+codex-container --shell
+
+CONFIGURATION:
+--------------
+Config is stored in: ~/.config/codex-container/
+- Save API key: echo "sk-key" > ~/.config/codex-container/config/openai_key
+- Git config is preserved across sessions
+- NPM global packages are preserved
+
+DOCKER COMPOSE:
+---------------
+Alternative method using docker-compose:
+1. Edit docker-compose.yml to set your API key
+2. Run: docker-compose up -d
+3. Attach: docker attach codex-container-runtime
+
+FEATURES vs REFERENCE:
+----------------------
+✓ Workspace mounting (-w flag)
+✓ Config persistence (-c flag)  
+✓ Container management (--build, --stop, --clean)
+✓ Status checking (--status)
+✓ Log viewing (--logs)
+✓ Environment variables (-e flag)
+✓ Non-root user with UID mapping
+✓ Alpine Linux for minimal size
+✓ Pre-installed development tools
+
+NOTE ON @openai/codex:
+-----------------------
+The package @openai/codex may not exist publicly or may require
+authentication. The container will attempt to install it, but if
+it fails, you can:
+1. Install other OpenAI packages: npm install openai
+2. Use the container for general Node.js development
+3. Install any npm package you need
+
+The container is fully functional as an isolated Node.js
+development environment regardless of the Codex package status.
+
+TROUBLESHOOTING:
+----------------
+- Docker not running: Start Docker Desktop/daemon
+- Permission denied: Check file ownership and Docker group
+- Port conflicts: Stop other containers or change ports
+- Build fails: Check Docker disk space and network
+
+For more details, see the README.md in the extracted directory.

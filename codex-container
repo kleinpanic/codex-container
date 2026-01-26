@@ -1,0 +1,519 @@
+#!/usr/bin/env bash
+#
+# Codex Container Launcher
+# A convenient script to run OpenAI Codex in an isolated Docker container
+#
+# Usage:
+#   codex-container [options] [command]
+#
+# Notes:
+#   - Leading flags default to codex (e.g. `codex-container --search`)
+#   - Workspace is mounted at /workspace and workdir mirrors your host subdirectory when possible
+#
+
+set -e
+
+# Version information
+VERSION="1.0.0"
+
+# Default values
+HOST_PWD="$(pwd -P)"
+WORKSPACE_DIR="$(pwd)"
+CONFIG_BASE_DIR="$HOME/.config/codex-container"
+CONFIG_DIR="$HOME/.config/codex-container/config"
+IMAGE_NAME="codex-container:${VERSION}"
+CONTAINER_NAME="codex-container-runtime"
+
+# Runtime options
+ENV_FILE=""
+DEBUG_MODE="false"
+HOST_CODEX_DIR="false"
+
+# Color codes for output
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+BLUE=$'\033[0;34m'
+CYAN=$'\033[0;36m'
+MAGENTA=$'\033[0;35m'
+NC=$'\033[0m' # No Color
+
+# Function to display help
+show_help() {
+    cat << EOF
+${GREEN}Codex Container Launcher v${VERSION}${NC}
+An isolated Docker environment for OpenAI Codex and Node.js development
+
+${YELLOW}USAGE:${NC}
+    codex-container [OPTIONS] [COMMAND]
+
+${YELLOW}OPTIONS:${NC}
+    ${CYAN}-w, --workspace <path>${NC}      Set workspace directory (default: current directory)
+    ${CYAN}-c, --config <path>${NC}         Set config directory (default: \$HOME/.config/codex-container)
+    ${CYAN}-n, --name <name>${NC}           Set container name (default: codex-container-runtime)
+    ${CYAN}-e, --env <KEY=VALUE>${NC}       Set environment variable in container (repeatable)
+    ${CYAN}--env-file <path>${NC}           Load environment variables from a .env-style file
+    ${CYAN}--host-codex-dir${NC}            (Optional) Mount host ~/.codex for auth/state instead of /config persistence
+    ${CYAN}--debug${NC}                     Print resolved docker run invocation (no secrets redacted)
+    ${CYAN}-h, --help${NC}                  Show this help message
+    ${CYAN}--version${NC}                   Show version information
+
+${YELLOW}CONTAINER MANAGEMENT:${NC}
+    ${CYAN}--build${NC}                     Build or rebuild the container image
+    ${CYAN}--shell${NC}                     Open interactive shell in container
+    ${CYAN}--stop${NC}                      Stop and remove running container
+    ${CYAN}--clean${NC}                     Remove container and image
+    ${CYAN}--logs${NC}                      Show container logs
+    ${CYAN}--status${NC}                    Check container status
+    ${CYAN}--exec <command>${NC}            Execute command in running container
+
+${YELLOW}SHORTCUTS:${NC}
+    ${CYAN}--npm <args>${NC}                Run npm command (e.g., --npm install express)
+    ${CYAN}--node <file>${NC}               Run Node.js script
+    ${CYAN}--npx <command>${NC}             Run npx command
+    ${CYAN}--codex <args>${NC}              Run codex command directly (default target when args start with '-')
+
+${YELLOW}EXAMPLES:${NC}
+    ${BLUE}# Run in current directory${NC}
+    codex-container
+
+    ${BLUE}# Run with custom workspace${NC}
+    codex-container -w /path/to/project
+
+    ${BLUE}# Default target: leading flags go to codex${NC}
+    codex-container --search
+
+    ${BLUE}# Run codex directly (explicit)${NC}
+    codex-container --codex --full-auto --search
+
+    ${BLUE}# Autoload .env from workspace (or specify)${NC}
+    codex-container --env-file /path/to/.env --codex --search
+
+    ${BLUE}# Open interactive shell${NC}
+    codex-container --shell
+
+${YELLOW}ENVIRONMENT VARIABLES:${NC}
+    ${CYAN}CODEX_WORKSPACE${NC}        Override default workspace directory
+    ${CYAN}CODEX_CONFIG${NC}           Override default config directory
+    ${CYAN}CODEX_IMAGE${NC}            Override default Docker image name
+    ${CYAN}OPENAI_API_KEY${NC}         OpenAI API key for Codex
+    ${CYAN}GIT_USER_NAME${NC}          Git user name for commits
+    ${CYAN}GIT_USER_EMAIL${NC}         Git user email for commits
+    ${CYAN}CODEX_HOST_PWD${NC}         Host working directory (passed into container)
+    ${CYAN}CODEX_HOST_WORKSPACE${NC}   Host workspace root path (passed into container)
+    ${CYAN}CODEX_HOST_RELATIVE${NC}    Host relative path within workspace (passed into container)
+
+${YELLOW}CONFIGURATION:${NC}
+    Configuration is persisted in: ${CONFIG_BASE_DIR}
+
+    Codex state/config is persisted under:
+    ${CONFIG_BASE_DIR}/config/codex
+
+    To save OpenAI API key permanently:
+    echo "sk-your-key" > ${CONFIG_BASE_DIR}/config/openai_key
+
+${YELLOW}NOTES:${NC}
+    - Workspace is mounted at /workspace in the container (and workdir mirrors your host subdirectory when possible)
+    - Configuration is mounted at /config in the container
+    - Global npm packages are preserved across sessions
+    - Container runs as non-root user with sudo access
+
+${GREEN}For more information, see README.md${NC}
+EOF
+}
+
+# Function to show version
+show_version() {
+    echo -e "${GREEN}Codex Container${NC}"
+    echo -e "Version: ${YELLOW}${VERSION}${NC}"
+    echo -e "Image:   ${YELLOW}${IMAGE_NAME}${NC}"
+    if docker images --format "table {{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Size}}" | grep -q "$IMAGE_NAME"; then
+        echo -e "Status:  ${GREEN}Image built ✓${NC}"
+    else
+        echo -e "Status:  ${YELLOW}Image not built (run --build)${NC}"
+    fi
+}
+
+# Function to build container image
+build_image() {
+    echo -e "${GREEN}Building Codex Container image...${NC}"
+
+    # Resolve symlinks so builds work even if this script is installed as a symlink (e.g. /usr/local/bin).
+    local script_path="${BASH_SOURCE[0]}"
+    if command -v readlink >/dev/null 2>&1; then
+        local resolved
+        resolved="$(readlink -f "$script_path" 2>/dev/null || true)"
+        if [ -n "$resolved" ]; then
+            script_path="$resolved"
+        fi
+    fi
+
+    SCRIPT_DIR="$( cd "$( dirname "$script_path" )" && pwd -P )"
+    if [ ! -f "$SCRIPT_DIR/Dockerfile" ]; then
+        echo -e "${RED}Error: Dockerfile not found in $SCRIPT_DIR${NC}"
+        exit 1
+    fi
+
+    cd "$SCRIPT_DIR"
+    docker build -t "$IMAGE_NAME" . || {
+        echo -e "${RED}Failed to build image${NC}"
+        exit 1
+    }
+
+    echo -e "${GREEN}✓ Image built successfully: ${IMAGE_NAME}${NC}"
+}
+
+# Function to check container status
+check_status() {
+    echo -e "${CYAN}Container Status:${NC}"
+
+    if docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "^${IMAGE_NAME}$"; then
+        echo -e "  Image:     ${GREEN}✓ Built${NC} (${IMAGE_NAME})"
+    else
+        echo -e "  Image:     ${YELLOW}✗ Not built${NC} (run --build)"
+    fi
+
+    if docker ps --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
+        echo -e "  Container: ${GREEN}✓ Running${NC} (${CONTAINER_NAME})"
+        CONTAINER_ID=$(docker ps --filter "name=${CONTAINER_NAME}" --format "{{.ID}}")
+        UPTIME=$(docker ps --filter "name=${CONTAINER_NAME}" --format "{{.Status}}")
+        echo -e "  ID:        ${BLUE}${CONTAINER_ID}${NC}"
+        echo -e "  Uptime:    ${BLUE}${UPTIME}${NC}"
+        echo -e "  Volumes:"
+        docker inspect "$CONTAINER_NAME" --format='{{range .Mounts}}    {{.Source}} -> {{.Destination}}{{println}}{{end}}' 2>/dev/null || true
+    elif docker ps -a --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
+        echo -e "  Container: ${YELLOW}⊙ Stopped${NC} (${CONTAINER_NAME})"
+    else
+        echo -e "  Container: ${BLUE}○ Not created${NC}"
+    fi
+}
+
+# Function to stop container
+stop_container() {
+    if docker ps --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
+        echo -e "${YELLOW}Stopping container...${NC}"
+        docker stop "$CONTAINER_NAME" 2>/dev/null || true
+    fi
+    if docker ps -a --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
+        echo -e "${YELLOW}Removing container...${NC}"
+        docker rm "$CONTAINER_NAME" 2>/dev/null || true
+    fi
+    echo -e "${GREEN}✓ Container stopped and removed${NC}"
+}
+
+# Function to clean everything
+clean_all() {
+    echo -e "${YELLOW}Cleaning up Codex Container...${NC}"
+    stop_container
+    if docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "^${IMAGE_NAME}$"; then
+        echo -e "${YELLOW}Removing image...${NC}"
+        docker rmi "$IMAGE_NAME" 2>/dev/null || true
+        echo -e "${GREEN}✓ Image removed${NC}"
+    fi
+    echo -e "${GREEN}✓ Cleanup complete${NC}"
+}
+
+# Function to show logs
+show_logs() {
+    if docker ps --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
+        docker logs -f "$CONTAINER_NAME"
+    else
+        echo -e "${RED}Error: Container is not running${NC}"
+        echo -e "${YELLOW}Start the container first with: $0 --shell${NC}"
+        exit 1
+    fi
+}
+
+# Function to execute command in running container
+exec_in_container() {
+    local cmd="$1"
+    if docker ps --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
+        docker exec -it "$CONTAINER_NAME" bash -c "$cmd"
+    else
+        echo -e "${RED}Error: Container is not running${NC}"
+        echo -e "${YELLOW}Start the container first with: $0 --shell${NC}"
+        exit 1
+    fi
+}
+
+# Function to run container (argv-safe)
+run_container() {
+    local -a cmd=( "$@" )
+    local interactive="-it"
+    local network_mode=""
+    local -a extra_volumes=()
+    local -a docker_args=()
+    local -a env_args=()
+    local workdir="/workspace"
+
+    # Determine if we need TTY / networking based on the command
+    if [[ "${cmd[0]}" == "codex" ]]; then
+        local codex_noninteractive="false"
+        for arg in "${cmd[@]:1}"; do
+            case "$arg" in
+                --help|-h|--version|-V) codex_noninteractive="true" ;;
+            esac
+        done
+        case "${cmd[1]:-}" in
+            exec|e|completion|features|help) codex_noninteractive="true" ;;
+        esac
+
+        if [ "$codex_noninteractive" = "true" ]; then
+            interactive="-i"
+        else
+            interactive="-it"
+        fi
+
+        # Use host networking for codex (OAuth and reduced friction)
+        network_mode="--network host"
+    elif [[ "${cmd[0]}" != "bash" ]]; then
+        interactive="-i"
+    fi
+
+    # Create config directory if it doesn't exist
+    if [ ! -d "$CONFIG_DIR" ]; then
+        echo -e "${YELLOW}Creating config directory: $CONFIG_DIR${NC}"
+        mkdir -p "$CONFIG_DIR"
+    fi
+
+    # Create config subdirectories (persisted on host)
+    mkdir -p "$CONFIG_DIR/npm" "$CONFIG_DIR/codex" "$CONFIG_DIR/history" 2>/dev/null || true
+
+    # Optional: mount host ~/.codex (share auth/state with host)
+    if [ "$HOST_CODEX_DIR" = "true" ]; then
+        mkdir -p "$HOME/.codex" 2>/dev/null || true
+        chmod 755 "$HOME/.codex" 2>/dev/null || true
+        extra_volumes+=( -v "$HOME/.codex:/home/codex/.codex" )
+    fi
+
+    # Check if image exists
+    if ! docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "^${IMAGE_NAME}$"; then
+        echo -e "${YELLOW}Image not found. Building...${NC}"
+        build_image
+    fi
+
+    # Prepare environment variables (-e ...)
+    for env in "${ENV_ARRAY[@]}"; do
+        env_args+=( -e "$env" )
+    done
+
+    # Add host context env vars
+    env_args+=( -e "CODEX_HOST_PWD=$HOST_PWD" )
+    env_args+=( -e "CODEX_HOST_WORKSPACE=$WORKSPACE_DIR" )
+    if [ -n "$HOST_RELATIVE" ]; then
+        env_args+=( -e "CODEX_HOST_RELATIVE=$HOST_RELATIVE" )
+        workdir="/workspace/$HOST_RELATIVE"
+    else
+        env_args+=( -e "CODEX_HOST_RELATIVE=" )
+    fi
+
+    # Autoload .env (or use explicit env-file)
+    if [ -n "$ENV_FILE" ]; then
+        docker_args+=( --env-file "$ENV_FILE" )
+    fi
+
+    # Display startup info
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}  Starting Codex Container v${VERSION}  ${NC}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BLUE}Workspace:${NC} ${YELLOW}$WORKSPACE_DIR${NC}"
+    echo -e "${BLUE}Config:${NC}    ${YELLOW}$CONFIG_DIR${NC}"
+    echo -e "${BLUE}Container:${NC} ${YELLOW}$CONTAINER_NAME${NC}"
+    if [ -n "$ENV_FILE" ]; then
+        echo -e "${BLUE}Env file:${NC}  ${YELLOW}$ENV_FILE${NC}"
+    fi
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+
+    local -a run=( docker run --rm --init $interactive )
+    run+=( --name "$CONTAINER_NAME" )
+    if [ -n "$network_mode" ]; then
+        run+=( $network_mode )
+    fi
+    run+=( -v "$WORKSPACE_DIR:/workspace" )
+    run+=( -v "$CONFIG_DIR:/config" )
+    run+=( -v codex-npm-global:/home/codex/.npm-global )
+    run+=( --workdir "$workdir" )
+    run+=( -e "USER_UID=$(id -u)" )
+    run+=( -e "USER_GID=$(id -g)" )
+    run+=( "${extra_volumes[@]}" )
+    run+=( "${docker_args[@]}" )
+    run+=( "${env_args[@]}" )
+    run+=( "$IMAGE_NAME" )
+    run+=( "${cmd[@]}" )
+
+    if [ "$DEBUG_MODE" = "true" ]; then
+        echo -e "${MAGENTA}DEBUG: docker invocation:${NC}"
+        printf '%q ' "${run[@]}"
+        echo
+        echo
+    fi
+
+    "${run[@]}"
+}
+
+# --------------------------
+# Argument parsing
+# --------------------------
+ENV_ARRAY=()
+EXEC_COMMAND=""
+NODE_FILE=""
+ACTION=""
+
+# Command payloads (argv-safe)
+NPM_ARGS=()
+NPX_ARGS=()
+CODEX_ARGS=()
+COMMAND_ARGS=()
+
+# Host path context
+HOST_RELATIVE=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help) show_help; exit 0 ;;
+        --version) show_version; exit 0 ;;
+        -w|--workspace) WORKSPACE_DIR="$2"; shift 2 ;;
+        -c|--config) CONFIG_DIR="$2"; shift 2 ;;
+        -n|--name) CONTAINER_NAME="$2"; shift 2 ;;
+        -e|--env) ENV_ARRAY+=("$2"); shift 2 ;;
+        --env-file) ENV_FILE="$2"; shift 2 ;;
+        --debug) DEBUG_MODE="true"; shift ;;
+        --host-codex-dir) HOST_CODEX_DIR="true"; shift ;;
+        --build) ACTION="build"; shift ;;
+        --shell) ACTION="shell"; shift ;;
+        --stop) ACTION="stop"; shift ;;
+        --clean) ACTION="clean"; shift ;;
+        --logs) ACTION="logs"; shift ;;
+        --status) ACTION="status"; shift ;;
+        --exec) ACTION="exec"; EXEC_COMMAND="$2"; shift 2 ;;
+        --npm) ACTION="npm"; shift; NPM_ARGS=( "$@" ); break ;;
+        --node) ACTION="node"; NODE_FILE="$2"; shift 2 ;;
+        --npx) ACTION="npx"; shift; NPX_ARGS=( "$@" ); break ;;
+        --codex) ACTION="codex"; shift; CODEX_ARGS=( "$@" ); break ;;
+        codex) ACTION="codex"; shift; CODEX_ARGS=( "$@" ); break ;;
+        *)
+            COMMAND_ARGS=( "$@" )
+            break
+            ;;
+    esac
+done
+
+# Default target: codex when the first payload arg is a flag.
+if [ -z "$ACTION" ] && [ "${#COMMAND_ARGS[@]}" -gt 0 ]; then
+    case "${COMMAND_ARGS[0]}" in
+        codex)
+            ACTION="codex"
+            CODEX_ARGS=( "${COMMAND_ARGS[@]:1}" )
+            COMMAND_ARGS=()
+            ;;
+        -*)
+            ACTION="codex"
+            CODEX_ARGS=( "${COMMAND_ARGS[@]}" )
+            COMMAND_ARGS=()
+            ;;
+    esac
+fi
+
+# Override with environment variables if set
+WORKSPACE_DIR="${CODEX_WORKSPACE:-$WORKSPACE_DIR}"
+CONFIG_DIR="${CODEX_CONFIG:-$CONFIG_DIR}"
+IMAGE_NAME="${CODEX_IMAGE:-$IMAGE_NAME}"
+
+# Normalize ENV_FILE to absolute path if explicitly set
+if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
+    ENV_FILE="$(cd "$(dirname "$ENV_FILE")" && pwd -P)/$(basename "$ENV_FILE")"
+fi
+
+# Add OpenAI / Git env passthrough if present on host
+if [ -n "${OPENAI_API_KEY:-}" ]; then
+    ENV_ARRAY+=("OPENAI_API_KEY=$OPENAI_API_KEY")
+fi
+if [ -n "${GIT_USER_NAME:-}" ]; then
+    ENV_ARRAY+=("GIT_USER_NAME=$GIT_USER_NAME")
+fi
+if [ -n "${GIT_USER_EMAIL:-}" ]; then
+    ENV_ARRAY+=("GIT_USER_EMAIL=$GIT_USER_EMAIL")
+fi
+
+# Validate workspace directory (unless building/cleaning/status/stopping)
+if [ "$ACTION" != "build" ] && [ "$ACTION" != "clean" ] && [ "$ACTION" != "status" ] && [ "$ACTION" != "stop" ]; then
+    if [ ! -d "$WORKSPACE_DIR" ]; then
+        echo -e "${RED}Error: Workspace directory does not exist: $WORKSPACE_DIR${NC}"
+        exit 1
+    fi
+    WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd -P)"
+
+    # Compute host-relative path so container workdir can mirror where you are
+    if [[ "$HOST_PWD" == "$WORKSPACE_DIR" ]]; then
+        HOST_RELATIVE=""
+    elif [[ "$HOST_PWD" == "$WORKSPACE_DIR/"* ]]; then
+        HOST_RELATIVE="${HOST_PWD#"$WORKSPACE_DIR/"}"
+    else
+        HOST_RELATIVE=""
+    fi
+fi
+
+# Convert config dir to absolute path (handle ~)
+if [[ "$CONFIG_DIR" == ~* ]]; then
+    CONFIG_DIR="${CONFIG_DIR/#\~/$HOME}"
+fi
+CONFIG_DIR="$(cd "$(dirname "$CONFIG_DIR")" 2>/dev/null && pwd -P)/$(basename "$CONFIG_DIR")" || CONFIG_DIR="$HOME/.config/codex-container/config"
+
+# Determine env-file behavior:
+# Precedence: --env-file > .env in host cwd (if inside workspace) > .env at workspace root
+if [ -z "$ENV_FILE" ] && [ "$ACTION" != "build" ] && [ "$ACTION" != "clean" ]; then
+    if [ -n "$HOST_RELATIVE" ] && [ -f "$HOST_PWD/.env" ]; then
+        ENV_FILE="$HOST_PWD/.env"
+    elif [ -f "$WORKSPACE_DIR/.env" ]; then
+        ENV_FILE="$WORKSPACE_DIR/.env"
+    fi
+fi
+
+# Check if Docker is running
+if ! docker info > /dev/null 2>&1; then
+    echo -e "${RED}Error: Docker is not running or not accessible${NC}"
+    echo "Please start Docker and try again."
+    exit 1
+fi
+
+# Execute action
+case "$ACTION" in
+    build) build_image ;;
+    stop) stop_container ;;
+    clean) clean_all ;;
+    logs) show_logs ;;
+    status) check_status ;;
+    shell) run_container bash ;;
+    exec) exec_in_container "$EXEC_COMMAND" ;;
+    npm)
+        if [ "${#NPM_ARGS[@]}" -gt 0 ]; then
+            run_container npm "${NPM_ARGS[@]}"
+        else
+            run_container npm
+        fi
+        ;;
+    node) run_container node "$NODE_FILE" ;;
+    npx)
+        if [ "${#NPX_ARGS[@]}" -gt 0 ]; then
+            run_container npx "${NPX_ARGS[@]}"
+        else
+            run_container npx
+        fi
+        ;;
+    codex)
+        if [ "${#CODEX_ARGS[@]}" -gt 0 ]; then
+            run_container codex "${CODEX_ARGS[@]}"
+        else
+            run_container codex
+        fi
+        ;;
+    *)
+        if [ "${#COMMAND_ARGS[@]}" -gt 0 ]; then
+            run_container "${COMMAND_ARGS[@]}"
+        else
+            # Default behavior - run codex. Use --shell for shell
+            run_container codex
+        fi
+        ;;
+esac

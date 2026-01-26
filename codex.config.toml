@@ -1,0 +1,22 @@
+# Codex Container default configuration
+# This file is copied to /config/codex/config.toml on first run.
+#
+# See: https://developers.openai.com/codex/config-reference
+
+# Approval behavior: untrusted | on-failure | on-request | never
+approval_policy = "on-request"
+
+# Sandbox: read-only | workspace-write | danger-full-access
+sandbox_mode = "read-only"
+
+# History persistence: save-all | none
+[history]
+persistence = "save-all"
+# Cap history file size (bytes) by dropping oldest entries
+max_bytes = 10485760
+
+[features]
+# Cache shell env snapshots for faster repeated tool calls (beta)
+shell_snapshot = true
+# Allow the model to issue web searches (stable)
+web_search_request = true

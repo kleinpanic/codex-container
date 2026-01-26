@@ -1,0 +1,96 @@
+version: '3.8'
+
+services:
+  codex:
+    image: codex-container:1.0.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: codex-container-runtime
+    
+    # Interactive mode
+    stdin_open: true
+    tty: true
+    
+    # Volumes
+    volumes:
+      # Mount current directory as workspace
+      - .:/workspace
+      # Persist configuration
+      - codex-config:/config
+      # Persist npm global packages
+      - codex-npm-global:/home/codex/.npm-global
+      # Persist codex authentication (default: stored in /config/codex via entrypoint)
+      # - ${HOME}/.codex:/home/codex/.codex
+      # Optional: Mount Docker socket for Docker-in-Docker
+      # - /var/run/docker.sock:/var/run/docker.sock
+    
+    # Environment variables
+    environment:
+      - NODE_ENV=production
+      - CODEX_CONTAINER=true
+      - USER_UID=${USER_UID:-1000}
+      - USER_GID=${USER_GID:-1000}
+    
+    # Working directory
+    working_dir: /workspace
+    
+    # User
+    user: codex
+    
+    # Network
+    # Use host network for OAuth
+    network_mode: host
+    
+    # Resource limits (optional)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Command
+    command: bash
+
+  # Optional: Add a database service
+  # postgres:
+  #   image: postgres:16-alpine
+  #   container_name: codex-postgres
+  #   environment:
+  #     - POSTGRES_USER=codex
+  #     - POSTGRES_PASSWORD=codex
+  #     - POSTGRES_DB=codex_db
+  #   volumes:
+  #     - codex-postgres-data:/var/lib/postgresql/data
+  #   networks:
+  #     - codex-network
+  #   restart: unless-stopped
+
+  # Optional: Add Redis for caching
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: codex-redis
+  #   networks:
+  #     - codex-network
+  #   restart: unless-stopped
+
+# Volumes
+volumes:
+  codex-config:
+    name: codex-config
+  codex-npm-global:
+    name: codex-npm-global
+  # codex-postgres-data:
+  #   name: codex-postgres-data
+
+# Networks
+networks:
+  codex-network:
+    name: codex-network
+    driver: bridge

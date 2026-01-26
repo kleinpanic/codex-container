@@ -1,0 +1,52 @@
+# Git files
+.git
+.gitignore
+
+# Documentation
+*.md
+LICENSE
+CHANGELOG
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Dependencies
+node_modules/
+bower_components/
+
+# Build outputs
+dist/
+build/
+*.tar.gz
+
+# Test files
+test/
+tests/
+*.test.js
+*.spec.js
+
+# Docker files (when building)
+# Dockerfile
+# docker-compose*.yml
+# .dockerignore
+
+# Temporary files
+tmp/
+temp/
+*.tmp
