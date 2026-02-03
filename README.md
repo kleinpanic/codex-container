@@ -6,6 +6,10 @@ This repo gives you a single command (`codex-container`) that behaves like a per
 
 ---
 
+## Docs
+
+- `USAGE.md` for practical setup and workflows.
+
 ## Features
 
 - Codex-first UX: `codex-container --search` routes leading flags to `codex`.
