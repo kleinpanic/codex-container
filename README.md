@@ -8,7 +8,15 @@ This repo gives you a single command (`codex-container`) that behaves like a per
 
 ## Features
 
-- Codex-first UX: `codex-container --search` routes leading flags to `codex`.\n- Persistent per-workspace runtime container: `start/stop/rm/status/shell/exec` manage a workspace-scoped container and avoid name collisions.\n- Workspace mounting + correct working directory: Mount any folder to `/workspace` and mirror host subdirectories when possible.\n- Automatic `.env` injection: If your project has a `.env`, it is loaded into the container environment.\n- Persistent configuration: Codex config/state persists under your host config dir and survives rebuilds.\n- pip/pipx persistence: pipx installs live under `/config/pipx` and remain available across sessions.\n- SSH agent forwarding: If `SSH_AUTH_SOCK` is set, it is forwarded into the container.\n- Git identity propagation: Host `git config --global user.name/email` is applied to container global git config.
+- Codex-first UX: `codex-container --search` routes leading flags to `codex`.
+- Persistent per-workspace runtime container: `start/stop/rm/status/shell/exec` manage a workspace-scoped container and avoid name collisions.
+- Workspace mounting + correct working directory: Mount any folder to `/workspace` and mirror host subdirectories when possible.
+- Automatic `.env` injection: If your project has a `.env`, it is loaded into the container environment.
+- Persistent configuration: Codex config/state persists under your host config dir and survives rebuilds.
+- pip/pipx persistence: pipx installs live under `/config/pipx` and remain available across sessions.
+- SSH agent forwarding: If `SSH_AUTH_SOCK` is set, it is forwarded into the container.
+- Git identity propagation: Host `git config --global user.name/email` is applied to container global git config.
+- Agent container mode: Run an isolated tooling container with optional host Docker socket passthrough.
 
 ---
 
@@ -134,6 +142,28 @@ If you use the symlink approach, `--build` still works because the wrapper resol
 ./codex-container --ephemeral shell
 ```
 
+### Agent container mode (Docker socket passthrough)
+
+Use the agent container when you need a containerized environment that can still run Docker commands against the host daemon.
+
+Warning: `--agent-docker` grants the agent container control of the host Docker daemon.
+
+```bash
+# Run a command inside the agent container with Docker access
+./codex-container agent --agent-docker -- ./scripts/smoke.sh
+
+# Open a shell in the agent container (defaults to shell if no command)
+./codex-container agent --agent-docker
+
+# Specify a different agent image or workspace
+./codex-container agent --agent-image my-agent:latest --agent-workspace /path/to/repo -- ./scripts/smoke.sh
+```
+
+Notes:
+- The agent container mounts the workspace at the same absolute path and also mounts `/tmp` for host path parity.
+- If your host Docker socket requires elevated permissions, use `--agent-root` explicitly.
+- Use `./scripts/agent-smoke.sh` to run the existing smoke tests from inside the agent container.
+
 ---
 
 ## Security model
@@ -147,6 +177,8 @@ To opt into sudo for a specific runtime container:
 ```
 
 If a container already exists without sudo, remove it and recreate with `--allow-sudo`.
+
+Agent mode is separate from the runtime container. If you enable `--agent-docker`, the agent container can control the host Docker daemon.
 
 ---
 
@@ -170,7 +202,11 @@ By default, config persists on the host under:
 
 Persistent subpaths:
 
-- `/config/codex` contains Codex state/config. On first run, `codex.config.toml` is copied to `/config/codex/config.toml`.\n- `/config/npm` stores npm config/cache (symlinked to `/home/codex/.npm`).\n- `/config/history` stores persistent bash history at `/config/history/bash_history`.\n- `/config/pipx` stores pipx home and bin directory.\n- `/config/pip-cache` stores pip cache.
+- `/config/codex` contains Codex state/config. On first run, `codex.config.toml` is copied to `/config/codex/config.toml`.
+- `/config/npm` stores npm config/cache (symlinked to `/home/codex/.npm`).
+- `/config/history` stores persistent bash history at `/config/history/bash_history`.
+- `/config/pipx` stores pipx home and bin directory.
+- `/config/pip-cache` stores pip cache.
 
 Global npm installs persist via Docker volume:
 
@@ -251,6 +287,7 @@ Tip: keep project-specific secrets out of this file and use `.env` instead.
 ```
 codex-container/
 ├── Dockerfile
+├── Dockerfile.agent
 ├── VERSION
 ├── CHANGELOG.md
 ├── docker-compose.yml
@@ -259,6 +296,7 @@ codex-container/
 ├── codex.config.toml
 ├── Makefile
 ├── SETUP_GUIDE.txt
+├── scripts/agent-smoke.sh
 └── README.md
 ```
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0 - 2026-02-03
+
+Summary:
+- Added agent container mode with optional host Docker socket passthrough for running Docker-based tests inside a container.
+- Introduced companion agent image (Dockerfile.agent) with docker CLI and basic tooling.
+- Added agent smoke helper script and agent-focused CLI flags.
+
 ## 1.1.0 - 2026-02-03
 
 Summary:
