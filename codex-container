@@ -226,10 +226,19 @@ get_last_container() {
 }
 
 resolve_workspace() {
+    if [ "$WORKSPACE_EXPLICIT" = "true" ] && [ -n "${WORKSPACE_DIR:-}" ]; then
+        WORKSPACE_DIR="$(expand_tilde "$WORKSPACE_DIR")"
+        if [ -d "$WORKSPACE_DIR" ]; then
+            WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd -P)"
+        fi
+        return
+    fi
     if [ -n "${CODEX_WORKSPACE:-}" ]; then
         WORKSPACE_EXPLICIT="true"
+        WORKSPACE_DIR="$CODEX_WORKSPACE"
+    else
+        WORKSPACE_DIR="$WORKSPACE_DIR_DEFAULT"
     fi
-    WORKSPACE_DIR="${CODEX_WORKSPACE:-$WORKSPACE_DIR_DEFAULT}"
     WORKSPACE_DIR="$(expand_tilde "$WORKSPACE_DIR")"
     if [ -n "$WORKSPACE_DIR" ] && [ -d "$WORKSPACE_DIR" ]; then
         WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd -P)"
@@ -237,6 +246,11 @@ resolve_workspace() {
 }
 
 resolve_config_dir() {
+    if [ -n "${CONFIG_DIR:-}" ]; then
+        CONFIG_DIR="$(expand_tilde "$CONFIG_DIR")"
+        CONFIG_DIR="$(abs_path "$CONFIG_DIR")"
+        return
+    fi
     CONFIG_DIR="${CODEX_CONFIG:-$CONFIG_DIR_DEFAULT}"
     CONFIG_DIR="$(expand_tilde "$CONFIG_DIR")"
     CONFIG_DIR="$(abs_path "$CONFIG_DIR")"
@@ -560,11 +574,14 @@ start_container() {
     if container_exists "$CONTAINER_NAME"; then
         local existing_allow
         existing_allow="$(get_container_label "$CONTAINER_NAME" "com.codex.allow_sudo")"
-        if [ "$ALLOW_SUDO" = "true" ] && [ "$existing_allow" != "true" ]; then
+        if [ "$ALLOW_SUDO" = "true" ] && [ "$existing_allow" = "false" ]; then
             fail "Container exists without --allow-sudo. Remove it with: $0 rm, then re-run: $0 --allow-sudo start"
         fi
         if [ "$ALLOW_SUDO" != "true" ] && [ "$existing_allow" = "true" ]; then
             warn "Container was created with --allow-sudo enabled."
+        fi
+        if [ -z "$existing_allow" ]; then
+            warn "Existing container missing allow-sudo label; proceeding without mismatch enforcement."
         fi
         if ! container_running "$CONTAINER_NAME"; then
             echo -e "${YELLOW}Starting existing container...${NC}"
@@ -695,12 +712,12 @@ exec_in_container() {
 
     if [ "$DEBUG_MODE" = "true" ]; then
         echo -e "${MAGENTA}DEBUG: docker exec invocation:${NC}"
-        printf '%q ' docker exec "$tty_flag" "$CONTAINER_NAME" "${exec_args[@]}" "${cmd[@]}"
+        printf '%q ' docker exec "$tty_flag" "${exec_args[@]}" "$CONTAINER_NAME" "${cmd[@]}"
         echo
         echo
     fi
 
-    docker exec "$tty_flag" "$CONTAINER_NAME" "${exec_args[@]}" "${cmd[@]}"
+    docker exec "$tty_flag" "${exec_args[@]}" "$CONTAINER_NAME" "${cmd[@]}"
 }
 
 run_ephemeral_container() {
