@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Extract version
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Validate version
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          FILE_VERSION="$(cat VERSION)"
+          if [ "$VERSION" != "$FILE_VERSION" ]; then
+            echo "Tag version $VERSION does not match VERSION file $FILE_VERSION" >&2
+            exit 1
+          fi
+      - name: Build release artifact
+        run: |
+          make package
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          sha256sum "dist/codex-container-v${VERSION}.tar.gz" > "dist/codex-container-v${VERSION}.tar.gz.sha256"
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/codex-container-v${{ steps.version.outputs.VERSION }}.tar.gz
+            dist/codex-container-v${{ steps.version.outputs.VERSION }}.tar.gz.sha256

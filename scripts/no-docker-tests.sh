@@ -35,9 +35,16 @@ for target in install-user uninstall-user install uninstall install-symlink prun
         exit 1
     fi
 done
+if ! grep -q "^install-user-copy:" "$root_dir/Makefile"; then
+    echo "Missing Makefile target: install-user-copy" >&2
+    exit 1
+fi
 
 workspace="$(mktemp -d /tmp/codex-nodocker.XXXXXX)"
-trap 'rm -rf "$workspace"' EXIT
+temp_home="$(mktemp -d /tmp/codex-home.XXXXXX)"
+temp_bin="$temp_home/.local/bin"
+repo_version="$(cat "$root_dir/VERSION")"
+trap 'rm -rf "$workspace" "$temp_home"' EXIT
 
 dry_output="$($codex --dry-run -w "$workspace" start)"
 printf '%s\n' "$dry_output" | grep -q "DRY RUN: docker run"
@@ -45,5 +52,19 @@ printf '%s\n' "$dry_output" | grep -q "$workspace:/workspace"
 
 dry_exec="$($codex --dry-run --name nodocker exec -- ls)"
 printf '%s\n' "$dry_exec" | grep -q "DRY RUN: docker exec"
+
+HOME="$temp_home" PATH="$temp_bin:$PATH" make -s install-user
+version_output="$(HOME="$temp_home" PATH="$temp_bin:$PATH" codex-container --version)"
+printf '%s\n' "$version_output" | grep -F -q "$repo_version"
+HOME="$temp_home" PATH="$temp_bin:$PATH" make -s uninstall-user
+if HOME="$temp_home" PATH="$temp_bin" command -v codex-container >/dev/null 2>&1; then
+    echo "install-user uninstall failed" >&2
+    exit 1
+fi
+
+HOME="$temp_home" PATH="$temp_bin:$PATH" make -s install-user-copy
+version_output="$(HOME="$temp_home" PATH="$temp_bin:$PATH" codex-container --version)"
+printf '%s\n' "$version_output" | grep -F -q "$repo_version"
+HOME="$temp_home" PATH="$temp_bin:$PATH" make -s uninstall-user
 
 echo "No-docker tests passed"

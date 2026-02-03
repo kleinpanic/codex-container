@@ -59,6 +59,12 @@ command -v codex-container
 codex-container --version
 ```
 
+If you prefer a standalone copy instead of a symlink:
+
+```bash
+make install-user-copy
+```
+
 Uninstall:
 
 ```bash
@@ -91,6 +97,16 @@ Confirm which binary is used:
 ```bash
 command -v codex-container
 ```
+
+---
+
+## Releasing
+
+- Bump `VERSION` (x.y.z).
+- Run `make smoke`.
+- Tag the release: `git tag vX.Y.Z`.
+- Push the tag: `git push origin vX.Y.Z`.
+- CI publishes the GitHub Release.
 
 ---
 

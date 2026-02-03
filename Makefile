@@ -3,7 +3,7 @@
 
 VERSION := $(shell cat VERSION 2>/dev/null)
 
-.PHONY: help build run shell start stop rm clean status logs install install-user uninstall uninstall-user install-symlink reinstall reinstall-user prune-images completions ci-local package compose-up compose-down compose-logs dev-rebuild test smoke version-check
+.PHONY: help build run shell start stop rm clean status logs install install-user install-user-copy uninstall uninstall-user install-symlink reinstall reinstall-user prune-images completions ci-local package compose-up compose-down compose-logs dev-rebuild test smoke version-check
 
 # Default target
 help:
@@ -19,7 +19,8 @@ help:
 	@echo "  make clean        - Remove container and image"
 	@echo "  make status       - Show container status"
 	@echo "  make logs         - Show container logs"
-	@echo "  make install-user - Install wrapper to ~/.local/bin"
+	@echo "  make install-user - Install wrapper symlink to ~/.local/bin"
+	@echo "  make install-user-copy - Install wrapper copy to ~/.local/bin"
 	@echo "  make uninstall-user - Remove wrapper from ~/.local/bin"
 	@echo "  make install      - Install wrapper to /usr/local/bin"
 	@echo "  make uninstall    - Remove wrapper from /usr/local/bin"
@@ -88,7 +89,17 @@ install:
 
 # Install wrapper script (user-local)
 install-user:
-	@echo "Installing codex-container to $$HOME/.local/bin..."
+	@echo "Installing codex-container symlink to $$HOME/.local/bin..."
+	@mkdir -p "$$HOME/.local/bin"
+	@ln -sf "$(PWD)/codex-container" "$$HOME/.local/bin/codex-container"
+	@echo "Symlinked: $$HOME/.local/bin/codex-container -> $(PWD)/codex-container"
+	@case ":$$PATH:" in \
+		*:"$$HOME/.local/bin":*) ;; \
+		*) echo "Note: $$HOME/.local/bin is not on PATH. Add it to your shell profile."; \
+	esac
+
+install-user-copy:
+	@echo "Installing codex-container copy to $$HOME/.local/bin..."
 	@chmod +x codex-container
 	@install -Dm755 codex-container "$$HOME/.local/bin/codex-container" 2>/dev/null || \
 		{ mkdir -p "$$HOME/.local/bin" && install -m 755 codex-container "$$HOME/.local/bin/codex-container"; }
@@ -144,20 +155,23 @@ ci-local:
 # Create distributable package
 package:
 	@echo "Creating distribution package..."
-	@tar -czf ../codex-container-v$(VERSION).tar.gz \
+	@mkdir -p dist
+	@tar -czf dist/codex-container-v$(VERSION).tar.gz \
 		--transform 's,^,codex-container/,' \
 		Dockerfile \
+		Dockerfile.agent \
 		docker-compose.yml \
 		codex-container \
 		entrypoint.sh \
 		README.md \
+		USAGE.md \
 		Makefile \
 		.env.example \
 		.dockerignore \
 		VERSION \
 		CHANGELOG.md
-	@echo "Package created: ../codex-container-v$(VERSION).tar.gz"
-	@echo "Size: $$(du -h ../codex-container-v$(VERSION).tar.gz | cut -f1)"
+	@echo "Package created: dist/codex-container-v$(VERSION).tar.gz"
+	@echo "Size: $$(du -h dist/codex-container-v$(VERSION).tar.gz | cut -f1)"
 
 # Docker Compose commands
 compose-up:

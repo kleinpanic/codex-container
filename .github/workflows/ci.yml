@@ -2,35 +2,25 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
 
 jobs:
-  lint-no-docker:
+  ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install shellcheck
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
-      - name: Bash syntax check
-        run: bash -n codex-container entrypoint.sh scripts/*.sh
-      - name: Shellcheck
-        run: shellcheck codex-container entrypoint.sh scripts/*.sh
       - name: Version check
         run: ./scripts/check-version.sh
-      - name: No-docker tests
-        run: ./scripts/no-docker-tests.sh
-
-  docker-smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      - name: CI checks (no Docker)
+        run: make ci-local
       - name: Docker smoke (gated)
         run: |
           if docker info >/dev/null 2>&1; then
-            ./scripts/smoke.sh
-            ./scripts/agent-smoke.sh
+            make smoke
           else
             echo "Docker not available; skipping smoke tests."
           fi

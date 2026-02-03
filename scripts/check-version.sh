@@ -42,8 +42,11 @@ if ! grep -F -q "VERSION := \$(shell cat VERSION" "$root_dir/Makefile"; then
     die "Makefile must read VERSION from VERSION file"
 fi
 
-if ! grep -F -q 'VERSION_FILE="$SCRIPT_DIR/VERSION"' "$root_dir/codex-container"; then
-    die "codex-container must read VERSION from VERSION file"
+if ! grep -F -q "DEFAULT_VERSION=\"$version\"" "$root_dir/codex-container"; then
+    die "codex-container DEFAULT_VERSION must match VERSION file"
+fi
+if ! grep -F -q 'SCRIPT_DIR="$(resolve_script_dir)"' "$root_dir/codex-container"; then
+    die "codex-container must resolve SCRIPT_DIR"
 fi
 
 echo "Version check passed: $version"
