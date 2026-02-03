@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0 - 2026-02-03
+
+Summary:
+- Added user-local and system install/uninstall Make targets, plus optional symlink install.
+- Added runtime Docker socket opt-in (`--allow-docker`) and project-scoped image pruning (`prune-images`).
+- Added `--dry-run` for no-Docker validation and CI tiering with a no-Docker test script.
+- Added bash/zsh completion scripts and documentation updates.
+- Hardened git identity propagation with persistent global config symlinks.
+
 ## 1.2.0 - 2026-02-03
 
 Summary:
