@@ -87,13 +87,13 @@ if [ -z "$config_name" ] || [ -z "$config_email" ]; then
 fi
 
 if ! "$codex" -w "$workspace1" --name "$container1" exec -- sh -lc 'test -e ~/.gitconfig'; then
-    echo "Missing ~/.gitconfig in container" >&2
+    echo "Missing $HOME/.gitconfig in container" >&2
     exit 1
 fi
 
 gitconfig_target="$($codex -w "$workspace1" --name "$container1" exec -- sh -lc 'if [ -L ~/.gitconfig ]; then if readlink -f ~/.gitconfig >/dev/null 2>&1; then readlink -f ~/.gitconfig; else readlink ~/.gitconfig; fi; fi' | tr -d '\r')"
 if [ -n "$gitconfig_target" ] && [ "$gitconfig_target" != "/config/git/gitconfig" ]; then
-    echo "~/.gitconfig symlink target mismatch: $gitconfig_target" >&2
+    echo "$HOME/.gitconfig symlink target mismatch: $gitconfig_target" >&2
     exit 1
 fi
 
@@ -149,6 +149,7 @@ fi
 
 if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; then
     echo "SSH agent forwarding check..."
+    # shellcheck disable=SC2016 # Deferred expansion inside container shell.
     "$codex" -w "$workspace1" --name "$container1" exec -- sh -lc 'test -S "$SSH_AUTH_SOCK"' >/dev/null
 fi
 
