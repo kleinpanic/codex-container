@@ -59,6 +59,12 @@ command -v codex-container
 codex-container --version
 ```
 
+If you prefer a standalone copy instead of a symlink:
+
+```bash
+make install-user-copy
+```
+
 Uninstall:
 
 ```bash

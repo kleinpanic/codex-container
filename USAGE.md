@@ -8,10 +8,17 @@ Codex Container wraps the OpenAI Codex CLI in a repeatable Docker runtime. It so
 
 ## Installation
 
-User-local install:
+User-local install (symlink to the repo):
 
 ```bash
 make install-user
+command -v codex-container
+```
+
+User-local install (copy a standalone script):
+
+```bash
+make install-user-copy
 command -v codex-container
 ```
 
@@ -32,6 +39,16 @@ Uninstall:
 ```bash
 make uninstall
 ```
+
+Version reporting works for both symlink and copy installs.
+
+## Config and State
+
+By default, config and state persist on the host under:
+
+- `~/.config/codex-container/config`
+
+Inside the runtime container, that directory is mounted at `/config`.
 
 ## Core Workflows
 
