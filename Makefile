@@ -144,20 +144,23 @@ ci-local:
 # Create distributable package
 package:
 	@echo "Creating distribution package..."
-	@tar -czf ../codex-container-v$(VERSION).tar.gz \
+	@mkdir -p dist
+	@tar -czf dist/codex-container-v$(VERSION).tar.gz \
 		--transform 's,^,codex-container/,' \
 		Dockerfile \
+		Dockerfile.agent \
 		docker-compose.yml \
 		codex-container \
 		entrypoint.sh \
 		README.md \
+		USAGE.md \
 		Makefile \
 		.env.example \
 		.dockerignore \
 		VERSION \
 		CHANGELOG.md
-	@echo "Package created: ../codex-container-v$(VERSION).tar.gz"
-	@echo "Size: $$(du -h ../codex-container-v$(VERSION).tar.gz | cut -f1)"
+	@echo "Package created: dist/codex-container-v$(VERSION).tar.gz"
+	@echo "Size: $$(du -h dist/codex-container-v$(VERSION).tar.gz | cut -f1)"
 
 # Docker Compose commands
 compose-up:
