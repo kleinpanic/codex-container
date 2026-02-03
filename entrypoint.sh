@@ -36,11 +36,26 @@ can_sudo() {
     return 1
 }
 
+is_root() {
+    [ "$(id -u)" -eq 0 ]
+}
+
 # Function to setup user permissions
 setup_user() {
     if [ -n "$USER_UID" ] && [ -n "$USER_GID" ]; then
         if [ "$USER_UID" != "1000" ] || [ "$USER_GID" != "1000" ]; then
-            if can_sudo; then
+            if is_root; then
+                echo -e "${YELLOW}Adjusting user permissions...${NC}"
+                usermod -u "$USER_UID" codex 2>/dev/null || true
+                groupmod -g "$USER_GID" codex 2>/dev/null || true
+                chown -R codex:codex /home/codex 2>/dev/null || true
+
+                # Fix .codex directory permissions specifically (skip if it is a mount)
+                if [ -d /home/codex/.codex ] && ! is_mountpoint /home/codex/.codex; then
+                    chown -R "$USER_UID:$USER_GID" /home/codex/.codex 2>/dev/null || true
+                    chmod -R 755 /home/codex/.codex 2>/dev/null || true
+                fi
+            elif can_sudo; then
                 echo -e "${YELLOW}Adjusting user permissions...${NC}"
                 sudo usermod -u "$USER_UID" codex 2>/dev/null || true
                 sudo groupmod -g "$USER_GID" codex 2>/dev/null || true
@@ -60,6 +75,13 @@ setup_user() {
 init_config() {
     # Ensure /config exists and base structure is present
     mkdir -p /config /config/npm /config/codex /config/history /config/pipx /config/pip-cache /config/git 2>/dev/null || true
+    if is_root; then
+        if [ -n "$USER_UID" ] && [ -n "$USER_GID" ]; then
+            chown -R "$USER_UID:$USER_GID" /config 2>/dev/null || true
+        else
+            chown -R codex:codex /config 2>/dev/null || true
+        fi
+    fi
 
     export PIPX_HOME=/config/pipx
     export PIPX_BIN_DIR=/config/pipx/bin
@@ -169,6 +191,14 @@ init_config() {
     # Set up git config (empty values are allowed to clear prior config)
     git config --global user.name "$CODEX_GIT_NAME" || true
     git config --global user.email "$CODEX_GIT_EMAIL" || true
+
+    if is_root; then
+        if [ -n "$USER_UID" ] && [ -n "$USER_GID" ]; then
+            chown -R "$USER_UID:$USER_GID" /config 2>/dev/null || true
+        else
+            chown -R codex:codex /config 2>/dev/null || true
+        fi
+    fi
 }
 
 # Function to display welcome message
@@ -213,6 +243,12 @@ main() {
     # Show welcome message for interactive shell sessions
     if [ -t 1 ] && [ "$#" -eq 1 ] && [ "$1" = "bash" ]; then
         show_welcome
+    fi
+
+    if is_root; then
+        cmd="$(printf '%q ' "$@")"
+        cmd="${cmd% }"
+        exec su -s /bin/bash codex -c "$cmd"
     fi
 
     exec "$@"
