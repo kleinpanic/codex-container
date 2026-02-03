@@ -94,6 +94,16 @@ command -v codex-container
 
 ---
 
+## Releasing
+
+- Bump `VERSION` (x.y.z).
+- Run `make smoke`.
+- Tag the release: `git tag vX.Y.Z`.
+- Push the tag: `git push origin vX.Y.Z`.
+- CI publishes the GitHub Release.
+
+---
+
 ## Usage
 
 ### Runtime container lifecycle
