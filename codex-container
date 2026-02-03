@@ -60,11 +60,26 @@ PIPX_ARGS=()
 MCP_ARGS=()
 EXEC_ARGS=()
 COMMAND_ARGS=()
+AGENT_COMMAND_ARGS=()
 
 ACTION=""
 EXEC_COMMAND_STRING=""
 NODE_FILE=""
 HOST_RELATIVE=""
+
+AGENT_DOCKER="false"
+AGENT_IMAGE_NAME=""
+AGENT_IMAGE_EXPLICIT="false"
+AGENT_CONTAINER_NAME=""
+AGENT_WORKSPACE_DIR=""
+AGENT_CONFIG_DIR=""
+AGENT_WORKSPACE_EXPLICIT="false"
+AGENT_CONFIG_EXPLICIT="false"
+AGENT_SHELL="false"
+AGENT_ROOT="false"
+AGENT_SSH_AUTH_SOCK="auto"
+AGENT_ENV_ARRAY=()
+AGENT_ENV_FILE=""
 
 # --------------------------
 # Helpers
@@ -261,6 +276,60 @@ resolve_image_name() {
     IMAGE_NAME="${CODEX_IMAGE:-$default_image}"
 }
 
+resolve_agent_image_name() {
+    if [ -n "$AGENT_IMAGE_NAME" ]; then
+        AGENT_IMAGE_EXPLICIT="true"
+        return
+    fi
+    local default_image="codex-container-agent:${VERSION}"
+    AGENT_IMAGE_NAME="${default_image}"
+}
+
+resolve_agent_workspace() {
+    if [ "$AGENT_WORKSPACE_EXPLICIT" = "true" ] && [ -n "${AGENT_WORKSPACE_DIR:-}" ]; then
+        AGENT_WORKSPACE_DIR="$(expand_tilde "$AGENT_WORKSPACE_DIR")"
+        if [ -d "$AGENT_WORKSPACE_DIR" ]; then
+            AGENT_WORKSPACE_DIR="$(cd "$AGENT_WORKSPACE_DIR" && pwd -P)"
+        fi
+        return
+    fi
+    AGENT_WORKSPACE_DIR="$HOST_PWD"
+    AGENT_WORKSPACE_DIR="$(expand_tilde "$AGENT_WORKSPACE_DIR")"
+    if [ -d "$AGENT_WORKSPACE_DIR" ]; then
+        AGENT_WORKSPACE_DIR="$(cd "$AGENT_WORKSPACE_DIR" && pwd -P)"
+    fi
+}
+
+resolve_agent_config_dir() {
+    if [ "$AGENT_CONFIG_EXPLICIT" = "true" ] && [ -n "${AGENT_CONFIG_DIR:-}" ]; then
+        AGENT_CONFIG_DIR="$(expand_tilde "$AGENT_CONFIG_DIR")"
+        AGENT_CONFIG_DIR="$(abs_path "$AGENT_CONFIG_DIR")"
+        return
+    fi
+    AGENT_CONFIG_DIR="$CONFIG_DIR"
+}
+
+default_agent_container_name() {
+    if [ -n "$AGENT_WORKSPACE_DIR" ]; then
+        local hash
+        hash="$(hash_path "$AGENT_WORKSPACE_DIR")"
+        if [ -z "$hash" ]; then
+            fail "Unable to derive agent container name from workspace path."
+        fi
+        echo "codex-agent-${hash:0:12}"
+        return
+    fi
+    echo "codex-agent-runtime"
+}
+
+resolve_agent_container_name() {
+    if [ -n "$AGENT_CONTAINER_NAME" ]; then
+        echo "$AGENT_CONTAINER_NAME"
+        return
+    fi
+    echo "$(default_agent_container_name)"
+}
+
 default_container_name() {
     if [ -n "$WORKSPACE_DIR" ]; then
         local hash
@@ -319,6 +388,12 @@ normalize_env_file() {
     fi
 }
 
+normalize_agent_env_file() {
+    if [ -n "$AGENT_ENV_FILE" ] && [ -f "$AGENT_ENV_FILE" ]; then
+        AGENT_ENV_FILE="$(abs_path "$AGENT_ENV_FILE")"
+    fi
+}
+
 autoload_env_file() {
     if [ -n "$ENV_FILE" ]; then
         return
@@ -352,6 +427,27 @@ load_env_file_into_array() {
         fi
         if [[ "$line" == *=* ]]; then
             ENV_ARRAY+=("$line")
+        fi
+    done < "$file"
+}
+
+load_env_file_into_agent_array() {
+    local file="$1"
+    if [ ! -f "$file" ]; then
+        return
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ -z "$line" ]; then
+            continue
+        fi
+        if [[ "$line" == \#* ]]; then
+            continue
+        fi
+        if [[ "$line" == export* ]]; then
+            line="${line#export }"
+        fi
+        if [[ "$line" == *=* ]]; then
+            AGENT_ENV_ARRAY+=("$line")
         fi
     done < "$file"
 }
@@ -428,6 +524,15 @@ ${YELLOW}OPTIONS:${NC}
     ${CYAN}-n, --name <name>${NC}           Set container name (default: workspace-scoped)
     ${CYAN}-e, --env <KEY=VALUE>${NC}       Set environment variable in container (repeatable)
     ${CYAN}--env-file <path>${NC}           Load environment variables from a .env-style file
+    ${CYAN}--agent-docker${NC}              Enable host docker socket passthrough for agent container
+    ${CYAN}--agent-image <image>${NC}       Set agent container image (default: codex-container-agent:VERSION)
+    ${CYAN}--agent-shell${NC}               Open a shell in the agent container
+    ${CYAN}--agent-workspace <path>${NC}    Set agent workspace directory (default: current directory)
+    ${CYAN}--agent-config <path>${NC}       Set agent config directory (default: runtime config dir)
+    ${CYAN}--agent-ssh-auth-sock${NC}       Forward SSH_AUTH_SOCK into the agent container
+    ${CYAN}--agent-env <KEY=VALUE>${NC}     Set env var in agent container (repeatable)
+    ${CYAN}--agent-env-file <path>${NC}     Load agent env vars from a .env-style file
+    ${CYAN}--agent-root${NC}                Run agent container as root (required for some docker.sock setups)
     ${CYAN}--host-codex-dir${NC}            (Optional) Mount host ~/.codex for auth/state instead of /config persistence
     ${CYAN}--allow-sudo${NC}                Allow sudo/apk in the runtime container (opt-in, at start time)
     ${CYAN}--ephemeral${NC}                 Run a one-shot container (legacy --rm behavior)
@@ -443,6 +548,7 @@ ${YELLOW}SUBCOMMANDS:${NC}
     ${CYAN}shell${NC}                       Open interactive shell in runtime container
     ${CYAN}exec -- <command>${NC}           Execute command in runtime container
     ${CYAN}logs${NC}                        Show container logs
+    ${CYAN}agent -- <command>${NC}          Execute command in agent container (defaults to shell)
 
 ${YELLOW}SHORTCUTS:${NC}
     ${CYAN}codex [args]${NC}                Run codex (default target when args start with '-')
@@ -467,6 +573,9 @@ ${YELLOW}EXAMPLES:${NC}
 
     ${BLUE}# Run in ephemeral mode${NC}
     codex-container --ephemeral --search
+
+    ${BLUE}# Run a command in an agent container with Docker access${NC}
+    codex-container agent --agent-docker -- ./scripts/smoke.sh
 
 ${YELLOW}ENVIRONMENT VARIABLES:${NC}
     ${CYAN}CODEX_WORKSPACE${NC}        Override default workspace directory
@@ -529,6 +638,27 @@ build_image() {
     }
 
     echo -e "${GREEN}Image built successfully: ${IMAGE_NAME}${NC}"
+}
+
+build_agent_image() {
+    echo -e "${GREEN}Building Codex Agent image...${NC}"
+
+    if [ ! -f "$SCRIPT_DIR/Dockerfile.agent" ]; then
+        fail "Dockerfile.agent not found in $SCRIPT_DIR. If you installed a symlink, run from the repo or set --agent-image."
+    fi
+
+    (cd "$SCRIPT_DIR" && docker build --build-arg CODEX_VERSION="$VERSION" -f Dockerfile.agent -t "$AGENT_IMAGE_NAME" .) || {
+        fail "Failed to build agent image"
+    }
+
+    echo -e "${GREEN}Agent image built successfully: ${AGENT_IMAGE_NAME}${NC}"
+}
+
+ensure_agent_image() {
+    if ! image_exists "$AGENT_IMAGE_NAME"; then
+        warn "Agent image not found. Building..."
+        build_agent_image
+    fi
 }
 
 create_config_dirs() {
@@ -720,6 +850,92 @@ exec_in_container() {
     docker exec "$tty_flag" "${exec_args[@]}" "$CONTAINER_NAME" "${cmd[@]}"
 }
 
+docker_sock_gid() {
+    if [ -S /var/run/docker.sock ]; then
+        stat -c %g /var/run/docker.sock 2>/dev/null || true
+    fi
+}
+
+run_agent_container() {
+    local -a cmd=("$@")
+    local -a run=( docker run --rm --init )
+    local -a env_args=()
+    local -a vol_args=()
+    local -a docker_args=()
+    local tty_flag="-it"
+
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+        tty_flag="-i"
+    fi
+
+    ensure_agent_image
+
+    if [ -z "$AGENT_CONTAINER_NAME" ]; then
+        AGENT_CONTAINER_NAME="$(resolve_agent_container_name)"
+    fi
+
+    if [ -z "$AGENT_WORKSPACE_DIR" ]; then
+        fail "Agent workspace directory is required. Use --agent-workspace."
+    fi
+
+    if [ -n "$AGENT_CONFIG_DIR" ]; then
+        mkdir -p "$AGENT_CONFIG_DIR" || true
+    fi
+
+    if [ "$AGENT_DOCKER" = "true" ]; then
+        echo "Warning: --agent-docker grants this container control of the host Docker daemon."
+        if [ ! -S /var/run/docker.sock ]; then
+            fail "Docker socket not found at /var/run/docker.sock"
+        fi
+        vol_args+=( -v /var/run/docker.sock:/var/run/docker.sock )
+        if [ "$AGENT_ROOT" != "true" ]; then
+            local gid
+            gid="$(docker_sock_gid)"
+            if [ -n "$gid" ]; then
+                docker_args+=( --group-add "$gid" )
+            else
+                warn "Unable to detect docker.sock group; access may fail without --agent-root."
+            fi
+        fi
+    fi
+
+    if [ "$AGENT_ROOT" = "true" ]; then
+        run+=( --user 0:0 )
+    else
+        run+=( --user "$(id -u):$(id -g)" )
+    fi
+
+    run+=( "$tty_flag" )
+    run+=( --name "$AGENT_CONTAINER_NAME" )
+    run+=( --workdir "$AGENT_WORKSPACE_DIR" )
+
+    vol_args+=( -v "$AGENT_WORKSPACE_DIR:$AGENT_WORKSPACE_DIR" )
+    vol_args+=( -v "$AGENT_CONFIG_DIR:$AGENT_CONFIG_DIR" )
+    vol_args+=( -v "/tmp:/tmp" )
+
+    env_args+=( -e "CODEX_WORKSPACE=$AGENT_WORKSPACE_DIR" )
+    env_args+=( -e "CODEX_CONFIG=$AGENT_CONFIG_DIR" )
+    env_args+=( -e "HOME=/home/agent" )
+
+    if [ "$AGENT_SSH_AUTH_SOCK" = "true" ] || { [ "$AGENT_SSH_AUTH_SOCK" = "auto" ] && [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; }; then
+        vol_args+=( -v "$SSH_AUTH_SOCK:/ssh-agent" )
+        env_args+=( -e "SSH_AUTH_SOCK=/ssh-agent" )
+    fi
+
+    for env in "${AGENT_ENV_ARRAY[@]}"; do
+        env_args+=( -e "$env" )
+    done
+
+    if [ "$DEBUG_MODE" = "true" ]; then
+        echo -e "${MAGENTA}DEBUG: agent docker run invocation:${NC}"
+        printf '%q ' "${run[@]}" "${docker_args[@]}" "${vol_args[@]}" "${env_args[@]}" "$AGENT_IMAGE_NAME" "${cmd[@]}"
+        echo
+        echo
+    fi
+
+    "${run[@]}" "${docker_args[@]}" "${vol_args[@]}" "${env_args[@]}" "$AGENT_IMAGE_NAME" "${cmd[@]}"
+}
+
 run_ephemeral_container() {
     local -a cmd=("$@")
     local interactive="-it"
@@ -830,6 +1046,10 @@ resolve_config_dir
 resolve_image_name
 
 while [[ $# -gt 0 ]]; do
+    if [ "$ACTION" = "agent" ] && [[ "${1:-}" != -* ]]; then
+        AGENT_COMMAND_ARGS=( "$@" )
+        break
+    fi
     case "$1" in
         -h|--help) show_help; exit 0 ;;
         --version) show_version; exit 0 ;;
@@ -838,10 +1058,19 @@ while [[ $# -gt 0 ]]; do
         -n|--name) CONTAINER_NAME="$2"; CONTAINER_NAME_EXPLICIT="true"; shift 2 ;;
         -e|--env) ENV_ARRAY+=("$2"); shift 2 ;;
         --env-file) ENV_FILE="$2"; shift 2 ;;
+        --agent-env) AGENT_ENV_ARRAY+=("$2"); shift 2 ;;
+        --agent-env-file) AGENT_ENV_FILE="$2"; shift 2 ;;
         --debug) DEBUG_MODE="true"; shift ;;
         --host-codex-dir) HOST_CODEX_DIR="true"; shift ;;
         --allow-sudo) ALLOW_SUDO="true"; shift ;;
         --ephemeral) EPHEMERAL="true"; shift ;;
+        --agent-docker) AGENT_DOCKER="true"; shift ;;
+        --agent-image) AGENT_IMAGE_NAME="$2"; AGENT_IMAGE_EXPLICIT="true"; shift 2 ;;
+        --agent-shell) AGENT_SHELL="true"; shift ;;
+        --agent-workspace) AGENT_WORKSPACE_DIR="$2"; AGENT_WORKSPACE_EXPLICIT="true"; shift 2 ;;
+        --agent-config) AGENT_CONFIG_DIR="$2"; AGENT_CONFIG_EXPLICIT="true"; shift 2 ;;
+        --agent-ssh-auth-sock) AGENT_SSH_AUTH_SOCK="true"; shift ;;
+        --agent-root) AGENT_ROOT="true"; shift ;;
         --build) ACTION="build"; shift ;;
         --start) ACTION="start"; shift ;;
         --stop) ACTION="stop"; shift ;;
@@ -866,7 +1095,13 @@ while [[ $# -gt 0 ]]; do
         --npx) ACTION="npx"; shift; NPX_ARGS=( "$@" ); break ;;
         --codex) ACTION="codex"; shift; CODEX_ARGS=( "$@" ); break ;;
         start|stop|rm|status|shell|logs)
+            if [ "$ACTION" = "agent" ]; then
+                AGENT_COMMAND_ARGS=( "$@" )
+                break
+            fi
             ACTION="$1"; shift ;;
+        agent)
+            ACTION="agent"; shift ;;
         exec)
             ACTION="exec"; shift
             if [ "${1:-}" = "--" ]; then
@@ -889,10 +1124,18 @@ while [[ $# -gt 0 ]]; do
             ACTION="node"; NODE_FILE="$2"; shift 2 ;;
         --)
             shift
-            COMMAND_ARGS=( "$@" )
+            if [ "$ACTION" = "agent" ]; then
+                AGENT_COMMAND_ARGS=( "$@" )
+            else
+                COMMAND_ARGS=( "$@" )
+            fi
             break
             ;;
         *)
+            if [ "$ACTION" = "agent" ]; then
+                AGENT_COMMAND_ARGS=( "$@" )
+                break
+            fi
             COMMAND_ARGS=( "$@" )
             break
             ;;
@@ -903,11 +1146,15 @@ done
 resolve_workspace
 resolve_config_dir
 resolve_image_name
+resolve_agent_workspace
+resolve_agent_config_dir
+resolve_agent_image_name
 
 # Normalize workspace/config/env file
 WORKSPACE_DIR="$(expand_tilde "$WORKSPACE_DIR")"
 CONFIG_DIR="$(expand_tilde "$CONFIG_DIR")"
 normalize_env_file
+normalize_agent_env_file
 
 # Determine action for leading flags default to codex
 if [ -z "$ACTION" ] && [ "${#COMMAND_ARGS[@]}" -gt 0 ]; then
@@ -929,6 +1176,19 @@ fi
 # Validate workspace when needed
 case "$ACTION" in
     build|clean|status|stop|rm|logs)
+        ;;
+    agent)
+        if [ -z "$AGENT_WORKSPACE_DIR" ]; then
+            fail "Agent workspace directory is required. Use --agent-workspace."
+        fi
+        if [ ! -d "$AGENT_WORKSPACE_DIR" ]; then
+            fail "Agent workspace directory does not exist: $AGENT_WORKSPACE_DIR"
+        fi
+        AGENT_WORKSPACE_DIR="$(cd "$AGENT_WORKSPACE_DIR" && pwd -P)"
+        if [ -n "$AGENT_CONFIG_DIR" ]; then
+            AGENT_CONFIG_DIR="$(expand_tilde "$AGENT_CONFIG_DIR")"
+            AGENT_CONFIG_DIR="$(abs_path "$AGENT_CONFIG_DIR")"
+        fi
         ;;
     exec)
         if [ "$CONTAINER_NAME_EXPLICIT" = "true" ] && [ "$WORKSPACE_CLI_EXPLICIT" != "true" ]; then
@@ -964,9 +1224,14 @@ if [ -n "$ENV_FILE" ]; then
     load_env_file_into_array "$ENV_FILE"
 fi
 
+if [ -n "$AGENT_ENV_FILE" ]; then
+    load_env_file_into_agent_array "$AGENT_ENV_FILE"
+fi
+
 # Add OpenAI / Git env passthrough if present on host
 if [ -n "${OPENAI_API_KEY:-}" ]; then
     ENV_ARRAY+=("OPENAI_API_KEY=$OPENAI_API_KEY")
+    AGENT_ENV_ARRAY+=("OPENAI_API_KEY=$OPENAI_API_KEY")
 fi
 
 # For management commands, prefer last container if workspace not explicitly set
@@ -989,6 +1254,11 @@ case "$ACTION" in
     clean|status|stop|rm|logs)
         if [ -z "$CONTAINER_NAME" ]; then
             CONTAINER_NAME="$(resolve_container_name)"
+        fi
+        ;;
+    agent)
+        if [ -z "$AGENT_CONTAINER_NAME" ]; then
+            AGENT_CONTAINER_NAME="$(resolve_agent_container_name)"
         fi
         ;;
     *)
@@ -1047,6 +1317,13 @@ case "$ACTION" in
             else
                 exec_in_container "${EXEC_ARGS[@]}"
             fi
+        fi
+        ;;
+    agent)
+        if [ "$AGENT_SHELL" = "true" ] || [ "${#AGENT_COMMAND_ARGS[@]}" -eq 0 ]; then
+            run_agent_container bash
+        else
+            run_agent_container "${AGENT_COMMAND_ARGS[@]}"
         fi
         ;;
     npm)

@@ -25,6 +25,15 @@ if ! grep -F -q "LABEL version=\"\${CODEX_VERSION}\"" "$root_dir/Dockerfile"; th
     die "Dockerfile version label must reference CODEX_VERSION"
 fi
 
+if [ -f "$root_dir/Dockerfile.agent" ]; then
+    if ! grep -F -q "ARG CODEX_VERSION" "$root_dir/Dockerfile.agent"; then
+        die "Dockerfile.agent missing ARG CODEX_VERSION"
+    fi
+    if ! grep -F -q "LABEL version=\"\${CODEX_VERSION}\"" "$root_dir/Dockerfile.agent"; then
+        die "Dockerfile.agent version label must reference CODEX_VERSION"
+    fi
+fi
+
 if ! grep -F -q "image: codex-container:\${CODEX_VERSION}" "$root_dir/docker-compose.yml"; then
     die "docker-compose.yml must reference CODEX_VERSION for image"
 fi
