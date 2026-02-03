@@ -27,15 +27,13 @@ MAGENTA=$'\033[0;35m'
 NC=$'\033[0m' # No Color
 
 SCRIPT_DIR=""
-DEFAULT_VERSION="1.3.2"
+DEFAULT_VERSION="1.3.3"
 VERSION=""
-VERSION_FILE=""
 
 HOST_PWD="$(pwd -P)"
 WORKSPACE_DIR_DEFAULT="$(pwd)"
 CONFIG_HOME_DEFAULT="$HOME/.config/codex-container"
 CONFIG_DIR_DEFAULT="$CONFIG_HOME_DEFAULT/config"
-STATE_DIR_DEFAULT="$CONFIG_HOME_DEFAULT/state"
 
 WORKSPACE_DIR=""
 CONFIG_DIR=""
@@ -73,7 +71,6 @@ HOST_RELATIVE=""
 
 AGENT_DOCKER="false"
 AGENT_IMAGE_NAME=""
-AGENT_IMAGE_EXPLICIT="false"
 AGENT_CONTAINER_NAME=""
 AGENT_WORKSPACE_DIR=""
 AGENT_CONFIG_DIR=""
@@ -140,7 +137,6 @@ load_version() {
         "$HOME/.local/share/codex-container/VERSION" \
         "/usr/local/share/codex-container/VERSION"; do
         if [ -s "$candidate" ]; then
-            VERSION_FILE="$candidate"
             VERSION="$(cat "$candidate")"
             return
         fi
@@ -303,7 +299,6 @@ resolve_image_name() {
 
 resolve_agent_image_name() {
     if [ -n "$AGENT_IMAGE_NAME" ]; then
-        AGENT_IMAGE_EXPLICIT="true"
         return
     fi
     local default_image="codex-container-agent:${VERSION}"
@@ -352,7 +347,7 @@ resolve_agent_container_name() {
         echo "$AGENT_CONTAINER_NAME"
         return
     fi
-    echo "$(default_agent_container_name)"
+    default_agent_container_name
 }
 
 default_container_name() {
@@ -383,7 +378,7 @@ resolve_container_name() {
         fi
     fi
     if [ -n "$WORKSPACE_DIR" ]; then
-        echo "$(default_container_name)"
+        default_container_name
         return
     fi
     local last
@@ -1036,7 +1031,7 @@ run_agent_container() {
 run_ephemeral_container() {
     local -a cmd=("$@")
     local interactive="-it"
-    local network_mode=""
+    local -a network_mode=()
     local -a extra_volumes=()
     local -a docker_args=()
     local -a env_args=()
@@ -1058,7 +1053,7 @@ run_ephemeral_container() {
         else
             interactive="-it"
         fi
-        network_mode="--network host"
+        network_mode=( --network host )
     elif [[ "${cmd[0]}" != "bash" ]]; then
         interactive="-i"
     fi
@@ -1112,13 +1107,16 @@ run_ephemeral_container() {
         fi
     fi
 
-    local -a run=( docker run --rm --init $interactive )
+    local -a run=( docker run --rm --init )
+    local -a interactive_args=()
+    if [ -n "$interactive" ]; then
+        interactive_args=( "$interactive" )
+    fi
+    run+=( "${interactive_args[@]}" )
     if [ "$CONTAINER_NAME_EXPLICIT" = "true" ]; then
         run+=( --name "$CONTAINER_NAME" )
     fi
-    if [ -n "$network_mode" ]; then
-        run+=( $network_mode )
-    fi
+    run+=( "${network_mode[@]}" )
     if [ "$ALLOW_SUDO" != "true" ]; then
         run+=( --security-opt=no-new-privileges )
     fi
@@ -1238,7 +1236,7 @@ while [[ $# -gt 0 ]]; do
         --ephemeral) EPHEMERAL="true"; shift ;;
         --yes) PRUNE_YES="true"; shift ;;
         --agent-docker) AGENT_DOCKER="true"; shift ;;
-        --agent-image) AGENT_IMAGE_NAME="$2"; AGENT_IMAGE_EXPLICIT="true"; shift 2 ;;
+        --agent-image) AGENT_IMAGE_NAME="$2"; shift 2 ;;
         --agent-shell) AGENT_SHELL="true"; shift ;;
         --agent-workspace) AGENT_WORKSPACE_DIR="$2"; AGENT_WORKSPACE_EXPLICIT="true"; shift 2 ;;
         --agent-config) AGENT_CONFIG_DIR="$2"; AGENT_CONFIG_EXPLICIT="true"; shift 2 ;;

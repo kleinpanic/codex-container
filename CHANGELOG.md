@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.3 - 2026-02-03
+
+Summary:
+- Cleaned up ShellCheck findings to unblock CI without changing behavior.
+
 ## 1.3.0 - 2026-02-03
 
 Summary:

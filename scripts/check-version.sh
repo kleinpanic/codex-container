@@ -45,6 +45,7 @@ fi
 if ! grep -F -q "DEFAULT_VERSION=\"$version\"" "$root_dir/codex-container"; then
     die "codex-container DEFAULT_VERSION must match VERSION file"
 fi
+# shellcheck disable=SC2016 # Literal $(...) required for exact match in script.
 if ! grep -F -q 'SCRIPT_DIR="$(resolve_script_dir)"' "$root_dir/codex-container"; then
     die "codex-container must resolve SCRIPT_DIR"
 fi
