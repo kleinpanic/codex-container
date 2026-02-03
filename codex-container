@@ -27,6 +27,7 @@ MAGENTA=$'\033[0;35m'
 NC=$'\033[0m' # No Color
 
 SCRIPT_DIR=""
+DEFAULT_VERSION="1.3.2"
 VERSION=""
 VERSION_FILE=""
 
@@ -109,6 +110,13 @@ print_dry_run() {
 
 resolve_script_dir() {
     local source="${BASH_SOURCE[0]}"
+    if command -v readlink >/dev/null 2>&1; then
+        local resolved
+        resolved="$(readlink -f "$source" 2>/dev/null || true)"
+        if [ -n "$resolved" ]; then
+            source="$resolved"
+        fi
+    fi
     while [ -h "$source" ]; do
         local dir
         dir="$(cd -P "$(dirname "$source")" && pwd)"
@@ -126,12 +134,17 @@ resolve_script_dir() {
 
 load_version() {
     SCRIPT_DIR="$(resolve_script_dir)"
-    VERSION_FILE="$SCRIPT_DIR/VERSION"
-    if [ -f "$VERSION_FILE" ]; then
-        VERSION="$(cat "$VERSION_FILE")"
-    else
-        VERSION="0.0.0"
-    fi
+    VERSION="$DEFAULT_VERSION"
+    for candidate in \
+        "$SCRIPT_DIR/VERSION" \
+        "$HOME/.local/share/codex-container/VERSION" \
+        "/usr/local/share/codex-container/VERSION"; do
+        if [ -s "$candidate" ]; then
+            VERSION_FILE="$candidate"
+            VERSION="$(cat "$candidate")"
+            return
+        fi
+    done
 }
 
 expand_tilde() {
