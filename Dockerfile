@@ -3,31 +3,33 @@
 
 FROM alpine:3.19
 
+ARG CODEX_VERSION=dev
+
 # Container metadata
 LABEL maintainer="codex-container"
 LABEL description="Isolated environment for OpenAI Codex"
-LABEL version="1.0.0"
+LABEL version="${CODEX_VERSION}"
 
 # Install essential packages
 RUN apk add --no-cache \
+    bash \
+    ca-certificates \
+    curl \
+    docker-cli \
+    git \
+    jq \
     nodejs \
     npm \
-    bash \
-    git \
-    curl \
-    wget \
-    ca-certificates \
     openssh-client \
     python3 \
     py3-pip \
-    make \
-    g++ \
-    jq \
-    vim \
-    nano \
+    pipx \
     shadow \
     sudo \
-    tzdata
+    tzdata \
+    build-base \
+    pkgconf \
+    linux-headers
 
 # Create non-root user with sudo capabilities
 RUN addgroup -g 1000 codex && \
@@ -40,7 +42,10 @@ RUN addgroup -g 1000 codex && \
 
 # Configure npm for global installations
 ENV NPM_CONFIG_PREFIX=/home/codex/.npm-global
-ENV PATH=/home/codex/.npm-global/bin:$PATH
+ENV PIPX_HOME=/config/pipx
+ENV PIPX_BIN_DIR=/config/pipx/bin
+ENV PIP_CACHE_DIR=/config/pip-cache
+ENV PATH=/home/codex/.npm-global/bin:/config/pipx/bin:$PATH
 
 # Create .codex directory with proper permissions
 RUN mkdir -p /home/codex/.codex && \

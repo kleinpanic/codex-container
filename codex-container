@@ -11,23 +11,11 @@
 #   - Workspace is mounted at /workspace and workdir mirrors your host subdirectory when possible
 #
 
-set -e
+set -euo pipefail
 
-# Version information
-VERSION="1.0.0"
-
-# Default values
-HOST_PWD="$(pwd -P)"
-WORKSPACE_DIR="$(pwd)"
-CONFIG_BASE_DIR="$HOME/.config/codex-container"
-CONFIG_DIR="$HOME/.config/codex-container/config"
-IMAGE_NAME="codex-container:${VERSION}"
-CONTAINER_NAME="codex-container-runtime"
-
-# Runtime options
-ENV_FILE=""
-DEBUG_MODE="false"
-HOST_CODEX_DIR="false"
+# --------------------------
+# Globals
+# --------------------------
 
 # Color codes for output
 RED=$'\033[0;31m'
@@ -38,7 +26,502 @@ CYAN=$'\033[0;36m'
 MAGENTA=$'\033[0;35m'
 NC=$'\033[0m' # No Color
 
-# Function to display help
+SCRIPT_DIR=""
+VERSION=""
+VERSION_FILE=""
+
+HOST_PWD="$(pwd -P)"
+WORKSPACE_DIR_DEFAULT="$(pwd)"
+CONFIG_HOME_DEFAULT="$HOME/.config/codex-container"
+CONFIG_DIR_DEFAULT="$CONFIG_HOME_DEFAULT/config"
+STATE_DIR_DEFAULT="$CONFIG_HOME_DEFAULT/state"
+
+WORKSPACE_DIR=""
+CONFIG_DIR=""
+IMAGE_NAME=""
+CONTAINER_NAME=""
+WORKSPACE_EXPLICIT="false"
+PREFER_LAST_CONTAINER="false"
+CONTAINER_NAME_EXPLICIT="false"
+WORKSPACE_CLI_EXPLICIT="false"
+
+ENV_FILE=""
+DEBUG_MODE="false"
+HOST_CODEX_DIR="false"
+ALLOW_SUDO="false"
+EPHEMERAL="false"
+ALLOW_DOCKER="false"
+DRY_RUN="false"
+PRUNE_YES="false"
+
+# Command payloads (argv-safe)
+ENV_ARRAY=()
+NPM_ARGS=()
+NPX_ARGS=()
+CODEX_ARGS=()
+PIPX_ARGS=()
+MCP_ARGS=()
+EXEC_ARGS=()
+COMMAND_ARGS=()
+AGENT_COMMAND_ARGS=()
+
+ACTION=""
+EXEC_COMMAND_STRING=""
+NODE_FILE=""
+HOST_RELATIVE=""
+
+AGENT_DOCKER="false"
+AGENT_IMAGE_NAME=""
+AGENT_IMAGE_EXPLICIT="false"
+AGENT_CONTAINER_NAME=""
+AGENT_WORKSPACE_DIR=""
+AGENT_CONFIG_DIR=""
+AGENT_WORKSPACE_EXPLICIT="false"
+AGENT_CONFIG_EXPLICIT="false"
+AGENT_SHELL="false"
+AGENT_ROOT="false"
+AGENT_SSH_AUTH_SOCK="auto"
+AGENT_ENV_ARRAY=()
+AGENT_ENV_FILE=""
+
+# --------------------------
+# Helpers
+# --------------------------
+
+fail() {
+    echo -e "${RED}Error:${NC} $*" >&2
+    exit 1
+}
+
+info() {
+    echo -e "${BLUE}$*${NC}"
+}
+
+warn() {
+    echo -e "${YELLOW}Warning:${NC} $*"
+}
+
+print_dry_run() {
+    printf 'DRY RUN: '
+    printf '%q ' "$@"
+    printf '\n'
+}
+
+resolve_script_dir() {
+    local source="${BASH_SOURCE[0]}"
+    while [ -h "$source" ]; do
+        local dir
+        dir="$(cd -P "$(dirname "$source")" && pwd)"
+        local link
+        link="$(readlink "$source")"
+        if [[ "$link" == /* ]]; then
+            source="$link"
+        else
+            source="$dir/$link"
+        fi
+    done
+    cd -P "$(dirname "$source")" >/dev/null 2>&1
+    pwd
+}
+
+load_version() {
+    SCRIPT_DIR="$(resolve_script_dir)"
+    VERSION_FILE="$SCRIPT_DIR/VERSION"
+    if [ -f "$VERSION_FILE" ]; then
+        VERSION="$(cat "$VERSION_FILE")"
+    else
+        VERSION="0.0.0"
+    fi
+}
+
+expand_tilde() {
+    local path="$1"
+    if [[ "$path" == "~" ]]; then
+        echo "$HOME"
+        return
+    fi
+    if [[ "$path" == ~/* ]]; then
+        echo "${path/#\~/$HOME}"
+        return
+    fi
+    echo "$path"
+}
+
+abs_path() {
+    local path="$1"
+    path="$(expand_tilde "$path")"
+    if [ -d "$path" ]; then
+        (cd "$path" && pwd -P)
+        return
+    fi
+    local dir
+    dir="$(dirname "$path")"
+    local base
+    base="$(basename "$path")"
+    if [ -d "$dir" ]; then
+        local abs_dir
+        abs_dir="$(cd "$dir" && pwd -P)"
+        echo "$abs_dir/$base"
+    else
+        echo "$path"
+    fi
+}
+
+hash_path() {
+    local input="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$input" | sha256sum | awk '{print $1}'
+        return
+    fi
+    if command -v shasum >/dev/null 2>&1; then
+        printf '%s' "$input" | shasum -a 256 | awk '{print $1}'
+        return
+    fi
+    if command -v md5sum >/dev/null 2>&1; then
+        printf '%s' "$input" | md5sum | awk '{print $1}'
+        return
+    fi
+    if command -v md5 >/dev/null 2>&1; then
+        printf '%s' "$input" | md5 -q
+        return
+    fi
+    printf '%s' "$input" | cksum | awk '{print $1}'
+}
+
+container_exists() {
+    docker container inspect "$1" >/dev/null 2>&1
+}
+
+container_running() {
+    local state
+    state="$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null || true)"
+    [ "$state" = "true" ]
+}
+
+image_exists() {
+    docker image inspect "$1" >/dev/null 2>&1
+}
+
+get_container_label() {
+    local container="$1"
+    local key="$2"
+    docker inspect -f "{{ index .Config.Labels \"$key\" }}" "$container" 2>/dev/null || true
+}
+
+ensure_docker() {
+    if [ "$DRY_RUN" = "true" ]; then
+        return
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        fail "Docker is not running or not accessible. Please start Docker and try again."
+    fi
+}
+
+ensure_image() {
+    if ! image_exists "$IMAGE_NAME"; then
+        warn "Image not found. Building..."
+        build_image
+    fi
+}
+
+state_dir() {
+    local base
+    base="${CONFIG_HOME_DEFAULT}"
+    if [ -n "${CONFIG_DIR:-}" ]; then
+        base="$(dirname "$CONFIG_DIR")"
+    fi
+    echo "$base/state"
+}
+
+last_container_file() {
+    echo "$(state_dir)/last_container"
+}
+
+set_last_container() {
+    local path
+    path="$(last_container_file)"
+    mkdir -p "$(dirname "$path")"
+    echo "$1" > "$path"
+}
+
+get_last_container() {
+    local path
+    path="$(last_container_file)"
+    if [ -f "$path" ]; then
+        cat "$path"
+    fi
+}
+
+resolve_workspace() {
+    if [ "$WORKSPACE_EXPLICIT" = "true" ] && [ -n "${WORKSPACE_DIR:-}" ]; then
+        WORKSPACE_DIR="$(expand_tilde "$WORKSPACE_DIR")"
+        if [ -d "$WORKSPACE_DIR" ]; then
+            WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd -P)"
+        fi
+        return
+    fi
+    if [ -n "${CODEX_WORKSPACE:-}" ]; then
+        WORKSPACE_EXPLICIT="true"
+        WORKSPACE_DIR="$CODEX_WORKSPACE"
+    else
+        WORKSPACE_DIR="$WORKSPACE_DIR_DEFAULT"
+    fi
+    WORKSPACE_DIR="$(expand_tilde "$WORKSPACE_DIR")"
+    if [ -n "$WORKSPACE_DIR" ] && [ -d "$WORKSPACE_DIR" ]; then
+        WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd -P)"
+    fi
+}
+
+resolve_config_dir() {
+    if [ -n "${CONFIG_DIR:-}" ]; then
+        CONFIG_DIR="$(expand_tilde "$CONFIG_DIR")"
+        CONFIG_DIR="$(abs_path "$CONFIG_DIR")"
+        return
+    fi
+    CONFIG_DIR="${CODEX_CONFIG:-$CONFIG_DIR_DEFAULT}"
+    CONFIG_DIR="$(expand_tilde "$CONFIG_DIR")"
+    CONFIG_DIR="$(abs_path "$CONFIG_DIR")"
+}
+
+resolve_image_name() {
+    local default_image="codex-container:${VERSION}"
+    IMAGE_NAME="${CODEX_IMAGE:-$default_image}"
+}
+
+resolve_agent_image_name() {
+    if [ -n "$AGENT_IMAGE_NAME" ]; then
+        AGENT_IMAGE_EXPLICIT="true"
+        return
+    fi
+    local default_image="codex-container-agent:${VERSION}"
+    AGENT_IMAGE_NAME="${default_image}"
+}
+
+resolve_agent_workspace() {
+    if [ "$AGENT_WORKSPACE_EXPLICIT" = "true" ] && [ -n "${AGENT_WORKSPACE_DIR:-}" ]; then
+        AGENT_WORKSPACE_DIR="$(expand_tilde "$AGENT_WORKSPACE_DIR")"
+        if [ -d "$AGENT_WORKSPACE_DIR" ]; then
+            AGENT_WORKSPACE_DIR="$(cd "$AGENT_WORKSPACE_DIR" && pwd -P)"
+        fi
+        return
+    fi
+    AGENT_WORKSPACE_DIR="$HOST_PWD"
+    AGENT_WORKSPACE_DIR="$(expand_tilde "$AGENT_WORKSPACE_DIR")"
+    if [ -d "$AGENT_WORKSPACE_DIR" ]; then
+        AGENT_WORKSPACE_DIR="$(cd "$AGENT_WORKSPACE_DIR" && pwd -P)"
+    fi
+}
+
+resolve_agent_config_dir() {
+    if [ "$AGENT_CONFIG_EXPLICIT" = "true" ] && [ -n "${AGENT_CONFIG_DIR:-}" ]; then
+        AGENT_CONFIG_DIR="$(expand_tilde "$AGENT_CONFIG_DIR")"
+        AGENT_CONFIG_DIR="$(abs_path "$AGENT_CONFIG_DIR")"
+        return
+    fi
+    AGENT_CONFIG_DIR="$CONFIG_DIR"
+}
+
+default_agent_container_name() {
+    if [ -n "$AGENT_WORKSPACE_DIR" ]; then
+        local hash
+        hash="$(hash_path "$AGENT_WORKSPACE_DIR")"
+        if [ -z "$hash" ]; then
+            fail "Unable to derive agent container name from workspace path."
+        fi
+        echo "codex-agent-${hash:0:12}"
+        return
+    fi
+    echo "codex-agent-runtime"
+}
+
+resolve_agent_container_name() {
+    if [ -n "$AGENT_CONTAINER_NAME" ]; then
+        echo "$AGENT_CONTAINER_NAME"
+        return
+    fi
+    echo "$(default_agent_container_name)"
+}
+
+default_container_name() {
+    if [ -n "$WORKSPACE_DIR" ]; then
+        local hash
+        hash="$(hash_path "$WORKSPACE_DIR")"
+        if [ -z "$hash" ]; then
+            fail "Unable to derive container name from workspace path."
+        fi
+        echo "codex-container-${hash:0:12}"
+        return
+    fi
+    echo "codex-container-runtime"
+}
+
+resolve_container_name() {
+    if [ -n "$CONTAINER_NAME" ]; then
+        echo "$CONTAINER_NAME"
+        return
+    fi
+    if [ "$PREFER_LAST_CONTAINER" = "true" ]; then
+        local last
+        last="$(get_last_container || true)"
+        if [ -n "$last" ]; then
+            warn "No workspace provided. Using last container: $last"
+            echo "$last"
+            return
+        fi
+    fi
+    if [ -n "$WORKSPACE_DIR" ]; then
+        echo "$(default_container_name)"
+        return
+    fi
+    local last
+    last="$(get_last_container || true)"
+    if [ -n "$last" ]; then
+        warn "No workspace provided. Using last container: $last"
+        echo "$last"
+        return
+    fi
+    fail "Container name not resolved. Provide --workspace or --name."
+}
+
+resolve_host_relative() {
+    HOST_RELATIVE=""
+    if [ -n "$WORKSPACE_DIR" ]; then
+        if [[ "$HOST_PWD" == "$WORKSPACE_DIR" ]]; then
+            HOST_RELATIVE=""
+        elif [[ "$HOST_PWD" == "$WORKSPACE_DIR/"* ]]; then
+            HOST_RELATIVE="${HOST_PWD#"$WORKSPACE_DIR/"}"
+        fi
+    fi
+}
+
+normalize_env_file() {
+    if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
+        ENV_FILE="$(abs_path "$ENV_FILE")"
+    fi
+}
+
+normalize_agent_env_file() {
+    if [ -n "$AGENT_ENV_FILE" ] && [ -f "$AGENT_ENV_FILE" ]; then
+        AGENT_ENV_FILE="$(abs_path "$AGENT_ENV_FILE")"
+    fi
+}
+
+autoload_env_file() {
+    if [ -n "$ENV_FILE" ]; then
+        return
+    fi
+    if [ -z "$WORKSPACE_DIR" ]; then
+        return
+    fi
+    if [ -n "$HOST_RELATIVE" ] && [ -f "$HOST_PWD/.env" ]; then
+        ENV_FILE="$HOST_PWD/.env"
+        return
+    fi
+    if [ -f "$WORKSPACE_DIR/.env" ]; then
+        ENV_FILE="$WORKSPACE_DIR/.env"
+    fi
+}
+
+load_env_file_into_array() {
+    local file="$1"
+    if [ ! -f "$file" ]; then
+        return
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ -z "$line" ]; then
+            continue
+        fi
+        if [[ "$line" == \#* ]]; then
+            continue
+        fi
+        if [[ "$line" == export* ]]; then
+            line="${line#export }"
+        fi
+        if [[ "$line" == *=* ]]; then
+            ENV_ARRAY+=("$line")
+        fi
+    done < "$file"
+}
+
+load_env_file_into_agent_array() {
+    local file="$1"
+    if [ ! -f "$file" ]; then
+        return
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ -z "$line" ]; then
+            continue
+        fi
+        if [[ "$line" == \#* ]]; then
+            continue
+        fi
+        if [[ "$line" == export* ]]; then
+            line="${line#export }"
+        fi
+        if [[ "$line" == *=* ]]; then
+            AGENT_ENV_ARRAY+=("$line")
+        fi
+    done < "$file"
+}
+
+collect_git_identity() {
+    local name=""
+    local email=""
+    if [ -n "${CODEX_GIT_NAME:-}" ]; then
+        name="$CODEX_GIT_NAME"
+    elif [ -n "${GIT_USER_NAME:-}" ]; then
+        name="$GIT_USER_NAME"
+    elif command -v git >/dev/null 2>&1; then
+        name="$(git config --global user.name 2>/dev/null || true)"
+    fi
+
+    if [ -n "${CODEX_GIT_EMAIL:-}" ]; then
+        email="$CODEX_GIT_EMAIL"
+    elif [ -n "${GIT_USER_EMAIL:-}" ]; then
+        email="$GIT_USER_EMAIL"
+    elif command -v git >/dev/null 2>&1; then
+        email="$(git config --global user.email 2>/dev/null || true)"
+    fi
+    ENV_ARRAY+=("CODEX_GIT_NAME=$name")
+    ENV_ARRAY+=("CODEX_GIT_EMAIL=$email")
+
+    if [ -z "$name" ] || [ -z "$email" ]; then
+        local marker
+        marker="$(state_dir)/git-identity-warning"
+        if [ ! -f "$marker" ]; then
+            warn "Host git identity not fully set (user.name or user.email missing)."
+            mkdir -p "$(dirname "$marker")" 2>/dev/null || true
+            touch "$marker" 2>/dev/null || true
+        fi
+    fi
+}
+
+print_startup_info() {
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}  Starting Codex Container v${VERSION}  ${NC}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    if [ -n "$WORKSPACE_DIR" ]; then
+        echo -e "${BLUE}Workspace:${NC} ${YELLOW}$WORKSPACE_DIR${NC}"
+    fi
+    echo -e "${BLUE}Config:${NC}    ${YELLOW}$CONFIG_DIR${NC}"
+    echo -e "${BLUE}Container:${NC} ${YELLOW}$CONTAINER_NAME${NC}"
+    if [ -n "$ENV_FILE" ]; then
+        echo -e "${BLUE}Env file:${NC}  ${YELLOW}$ENV_FILE${NC}"
+    fi
+    if [ "$ALLOW_SUDO" = "true" ]; then
+        echo -e "${BLUE}Sudo:${NC}      ${YELLOW}enabled${NC}"
+    else
+        echo -e "${BLUE}Sudo:${NC}      ${YELLOW}disabled${NC}"
+    fi
+    if [ "$ALLOW_DOCKER" = "true" ]; then
+        echo -e "${BLUE}Docker:${NC}    ${YELLOW}enabled${NC}"
+    else
+        echo -e "${BLUE}Docker:${NC}    ${YELLOW}disabled${NC}"
+    fi
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+}
+
 show_help() {
     cat << EOF
 ${GREEN}Codex Container Launcher v${VERSION}${NC}
@@ -46,199 +529,499 @@ An isolated Docker environment for OpenAI Codex and Node.js development
 
 ${YELLOW}USAGE:${NC}
     codex-container [OPTIONS] [COMMAND]
+    codex-container <subcommand> [OPTIONS]
 
 ${YELLOW}OPTIONS:${NC}
     ${CYAN}-w, --workspace <path>${NC}      Set workspace directory (default: current directory)
-    ${CYAN}-c, --config <path>${NC}         Set config directory (default: \$HOME/.config/codex-container)
-    ${CYAN}-n, --name <name>${NC}           Set container name (default: codex-container-runtime)
+    ${CYAN}-c, --config <path>${NC}         Set config directory (default: \$HOME/.config/codex-container/config)
+    ${CYAN}-n, --name <name>${NC}           Set container name (default: workspace-scoped)
     ${CYAN}-e, --env <KEY=VALUE>${NC}       Set environment variable in container (repeatable)
     ${CYAN}--env-file <path>${NC}           Load environment variables from a .env-style file
+    ${CYAN}--agent-docker${NC}              Enable host docker socket passthrough for agent container
+    ${CYAN}--agent-image <image>${NC}       Set agent container image (default: codex-container-agent:VERSION)
+    ${CYAN}--agent-shell${NC}               Open a shell in the agent container
+    ${CYAN}--agent-workspace <path>${NC}    Set agent workspace directory (default: current directory)
+    ${CYAN}--agent-config <path>${NC}       Set agent config directory (default: runtime config dir)
+    ${CYAN}--agent-ssh-auth-sock${NC}       Forward SSH_AUTH_SOCK into the agent container
+    ${CYAN}--agent-env <KEY=VALUE>${NC}     Set env var in agent container (repeatable)
+    ${CYAN}--agent-env-file <path>${NC}     Load agent env vars from a .env-style file
+    ${CYAN}--agent-root${NC}                Run agent container as root (required for some docker.sock setups)
     ${CYAN}--host-codex-dir${NC}            (Optional) Mount host ~/.codex for auth/state instead of /config persistence
-    ${CYAN}--debug${NC}                     Print resolved docker run invocation (no secrets redacted)
+    ${CYAN}--allow-sudo${NC}                Allow sudo/apk in the runtime container (opt-in, at start time)
+    ${CYAN}--allow-docker${NC}              Allow runtime container access to host Docker socket (opt-in)
+    ${CYAN}--ephemeral${NC}                 Run a one-shot container (legacy --rm behavior)
+    ${CYAN}--debug${NC}                     Print resolved docker invocation (no secrets redacted)
+    ${CYAN}--dry-run${NC}                   Print docker commands without running them
+    ${CYAN}--yes${NC}                       Auto-confirm prompts (for prune-images)
     ${CYAN}-h, --help${NC}                  Show this help message
     ${CYAN}--version${NC}                   Show version information
 
-${YELLOW}CONTAINER MANAGEMENT:${NC}
-    ${CYAN}--build${NC}                     Build or rebuild the container image
-    ${CYAN}--shell${NC}                     Open interactive shell in container
-    ${CYAN}--stop${NC}                      Stop and remove running container
-    ${CYAN}--clean${NC}                     Remove container and image
-    ${CYAN}--logs${NC}                      Show container logs
-    ${CYAN}--status${NC}                    Check container status
-    ${CYAN}--exec <command>${NC}            Execute command in running container
+${YELLOW}SUBCOMMANDS:${NC}
+    ${CYAN}start${NC}                       Create or ensure the runtime container exists
+    ${CYAN}stop${NC}                        Stop the runtime container
+    ${CYAN}rm${NC}                          Remove the runtime container
+    ${CYAN}clean${NC}                       Remove runtime container and image
+    ${CYAN}status${NC}                      Check container status
+    ${CYAN}shell${NC}                       Open interactive shell in runtime container
+    ${CYAN}exec -- <command>${NC}           Execute command in runtime container
+    ${CYAN}logs${NC}                        Show container logs
+    ${CYAN}agent -- <command>${NC}          Execute command in agent container (defaults to shell)
+    ${CYAN}prune-images${NC}                Remove old codex-container images (keeps current version)
 
 ${YELLOW}SHORTCUTS:${NC}
-    ${CYAN}--npm <args>${NC}                Run npm command (e.g., --npm install express)
-    ${CYAN}--node <file>${NC}               Run Node.js script
-    ${CYAN}--npx <command>${NC}             Run npx command
-    ${CYAN}--codex <args>${NC}              Run codex command directly (default target when args start with '-')
+    ${CYAN}codex [args]${NC}                Run codex (default target when args start with '-')
+    ${CYAN}npm [args]${NC}                  Run npm command
+    ${CYAN}npx [args]${NC}                  Run npx command
+    ${CYAN}node <file>${NC}                 Run Node.js script
+    ${CYAN}pipx [args]${NC}                 Run pipx in the runtime container
+    ${CYAN}mcp [args]${NC}                  Run codex mcp commands in the runtime container
 
 ${YELLOW}EXAMPLES:${NC}
-    ${BLUE}# Run in current directory${NC}
-    codex-container
+    ${BLUE}# Start a persistent runtime container${NC}
+    codex-container start
 
-    ${BLUE}# Run with custom workspace${NC}
-    codex-container -w /path/to/project
-
-    ${BLUE}# Default target: leading flags go to codex${NC}
+    ${BLUE}# Run codex (starts container if needed)${NC}
     codex-container --search
 
-    ${BLUE}# Run codex directly (explicit)${NC}
-    codex-container --codex --full-auto --search
-
-    ${BLUE}# Autoload .env from workspace (or specify)${NC}
-    codex-container --env-file /path/to/.env --codex --search
+    ${BLUE}# Use a custom workspace${NC}
+    codex-container -w /path/to/project start
 
     ${BLUE}# Open interactive shell${NC}
-    codex-container --shell
+    codex-container shell
+
+    ${BLUE}# Run in ephemeral mode${NC}
+    codex-container --ephemeral --search
+
+    ${BLUE}# Run a command in an agent container with Docker access${NC}
+    codex-container agent --agent-docker -- ./scripts/smoke.sh
+
+    ${BLUE}# Prune older codex-container images${NC}
+    codex-container prune-images --yes
 
 ${YELLOW}ENVIRONMENT VARIABLES:${NC}
     ${CYAN}CODEX_WORKSPACE${NC}        Override default workspace directory
     ${CYAN}CODEX_CONFIG${NC}           Override default config directory
     ${CYAN}CODEX_IMAGE${NC}            Override default Docker image name
     ${CYAN}OPENAI_API_KEY${NC}         OpenAI API key for Codex
-    ${CYAN}GIT_USER_NAME${NC}          Git user name for commits
-    ${CYAN}GIT_USER_EMAIL${NC}         Git user email for commits
+    ${CYAN}CODEX_GIT_NAME${NC}         Git user name (set inside container)
+    ${CYAN}CODEX_GIT_EMAIL${NC}        Git user email (set inside container)
     ${CYAN}CODEX_HOST_PWD${NC}         Host working directory (passed into container)
     ${CYAN}CODEX_HOST_WORKSPACE${NC}   Host workspace root path (passed into container)
     ${CYAN}CODEX_HOST_RELATIVE${NC}    Host relative path within workspace (passed into container)
 
 ${YELLOW}CONFIGURATION:${NC}
-    Configuration is persisted in: ${CONFIG_BASE_DIR}
+    Configuration is persisted in: ${CONFIG_DIR_DEFAULT}
 
     Codex state/config is persisted under:
-    ${CONFIG_BASE_DIR}/config/codex
+    ${CONFIG_DIR_DEFAULT}/codex
 
     To save OpenAI API key permanently:
-    echo "sk-your-key" > ${CONFIG_BASE_DIR}/config/openai_key
+    echo "sk-your-key" > ${CONFIG_DIR_DEFAULT}/openai_key
 
 ${YELLOW}NOTES:${NC}
     - Workspace is mounted at /workspace in the container (and workdir mirrors your host subdirectory when possible)
     - Configuration is mounted at /config in the container
     - Global npm packages are preserved across sessions
-    - Container runs as non-root user with sudo access
+    - Default mode does not allow sudo or apk installs. Use --allow-sudo to opt in.
+    - Use --allow-docker to expose the host Docker socket to the runtime container.
 
 ${GREEN}For more information, see README.md${NC}
 EOF
 }
 
-# Function to show version
 show_version() {
     echo -e "${GREEN}Codex Container${NC}"
     echo -e "Version: ${YELLOW}${VERSION}${NC}"
     echo -e "Image:   ${YELLOW}${IMAGE_NAME}${NC}"
-    if docker images --format "table {{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Size}}" | grep -q "$IMAGE_NAME"; then
-        echo -e "Status:  ${GREEN}Image built ✓${NC}"
+    if docker info >/dev/null 2>&1; then
+        if image_exists "$IMAGE_NAME"; then
+            echo -e "Status:  ${GREEN}Image built${NC}"
+        else
+            echo -e "Status:  ${YELLOW}Image not built (run start or --build)${NC}"
+        fi
     else
-        echo -e "Status:  ${YELLOW}Image not built (run --build)${NC}"
+        echo -e "Status:  ${YELLOW}Image status unavailable (docker not running)${NC}"
     fi
 }
 
-# Function to build container image
+# --------------------------
+# Docker operations
+# --------------------------
+
 build_image() {
     echo -e "${GREEN}Building Codex Container image...${NC}"
 
-    # Resolve symlinks so builds work even if this script is installed as a symlink (e.g. /usr/local/bin).
-    local script_path="${BASH_SOURCE[0]}"
-    if command -v readlink >/dev/null 2>&1; then
-        local resolved
-        resolved="$(readlink -f "$script_path" 2>/dev/null || true)"
-        if [ -n "$resolved" ]; then
-            script_path="$resolved"
+    if [ ! -f "$SCRIPT_DIR/Dockerfile" ]; then
+        fail "Dockerfile not found in $SCRIPT_DIR. If you installed a symlink, run from the repo or set CODEX_IMAGE."
+    fi
+
+    if [ "$DRY_RUN" = "true" ]; then
+        print_dry_run docker build --build-arg "CODEX_VERSION=$VERSION" -t "$IMAGE_NAME" "$SCRIPT_DIR"
+        return
+    fi
+
+    (cd "$SCRIPT_DIR" && docker build --build-arg CODEX_VERSION="$VERSION" -t "$IMAGE_NAME" .) || {
+        fail "Failed to build image"
+    }
+
+    echo -e "${GREEN}Image built successfully: ${IMAGE_NAME}${NC}"
+}
+
+build_agent_image() {
+    echo -e "${GREEN}Building Codex Agent image...${NC}"
+
+    if [ ! -f "$SCRIPT_DIR/Dockerfile.agent" ]; then
+        fail "Dockerfile.agent not found in $SCRIPT_DIR. If you installed a symlink, run from the repo or set --agent-image."
+    fi
+
+    if [ "$DRY_RUN" = "true" ]; then
+        print_dry_run docker build --build-arg "CODEX_VERSION=$VERSION" -f "$SCRIPT_DIR/Dockerfile.agent" -t "$AGENT_IMAGE_NAME" "$SCRIPT_DIR"
+        return
+    fi
+
+    (cd "$SCRIPT_DIR" && docker build --build-arg CODEX_VERSION="$VERSION" -f Dockerfile.agent -t "$AGENT_IMAGE_NAME" .) || {
+        fail "Failed to build agent image"
+    }
+
+    echo -e "${GREEN}Agent image built successfully: ${AGENT_IMAGE_NAME}${NC}"
+}
+
+ensure_agent_image() {
+    if ! image_exists "$AGENT_IMAGE_NAME"; then
+        warn "Agent image not found. Building..."
+        build_agent_image
+    fi
+}
+
+create_config_dirs() {
+    mkdir -p "$CONFIG_DIR" || true
+    mkdir -p "$CONFIG_DIR/npm" "$CONFIG_DIR/codex" "$CONFIG_DIR/history" "$CONFIG_DIR/pipx" "$CONFIG_DIR/pip-cache" "$CONFIG_DIR/git" || true
+}
+
+runtime_docker_args() {
+    local -a args=()
+    args+=( --init )
+    args+=( --name "$CONTAINER_NAME" )
+    args+=( --label "com.codex.workspace=$WORKSPACE_DIR" )
+    args+=( --label "com.codex.allow_sudo=$ALLOW_SUDO" )
+    args+=( --label "com.codex.allow_docker=$ALLOW_DOCKER" )
+    args+=( --network host )
+    args+=( -v "$WORKSPACE_DIR:/workspace" )
+    args+=( -v "$CONFIG_DIR:/config" )
+    args+=( -v codex-npm-global:/home/codex/.npm-global )
+    if [ "$HOST_CODEX_DIR" = "true" ]; then
+        mkdir -p "$HOME/.codex" 2>/dev/null || true
+        chmod 755 "$HOME/.codex" 2>/dev/null || true
+        args+=( -v "$HOME/.codex:/home/codex/.codex" )
+    fi
+    if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; then
+        args+=( -v "$SSH_AUTH_SOCK:/ssh-agent" )
+        args+=( -e "SSH_AUTH_SOCK=/ssh-agent" )
+    fi
+    args+=( -e "USER_UID=$(id -u)" )
+    args+=( -e "USER_GID=$(id -g)" )
+    args+=( -e "ALLOW_SUDO=$ALLOW_SUDO" )
+    args+=( -e "PIPX_HOME=/config/pipx" )
+    args+=( -e "PIPX_BIN_DIR=/config/pipx/bin" )
+    args+=( -e "PIP_CACHE_DIR=/config/pip-cache" )
+    for env in "${ENV_ARRAY[@]}"; do
+        args+=( -e "$env" )
+    done
+    if [ "$ALLOW_DOCKER" = "true" ]; then
+        if [ ! -S /var/run/docker.sock ]; then
+            fail "Docker socket not found at /var/run/docker.sock"
+        fi
+        args+=( -v /var/run/docker.sock:/var/run/docker.sock )
+        local gid
+        gid="$(docker_sock_gid)"
+        if [ -n "$gid" ]; then
+            args+=( --group-add "$gid" )
+        else
+            warn "Unable to detect docker.sock group; access may fail."
+        fi
+    fi
+    echo "${args[@]}"
+}
+
+start_container() {
+    if [ "$DRY_RUN" = "true" ]; then
+        create_config_dirs
+        local -a args
+        read -r -a args <<< "$(runtime_docker_args)"
+        if [ "$ALLOW_SUDO" != "true" ]; then
+            args+=( --security-opt=no-new-privileges )
+        fi
+        if [ "$ALLOW_DOCKER" = "true" ]; then
+            warn "Enabling docker socket gives this container control of the host Docker daemon."
+        fi
+        print_dry_run docker run -d "${args[@]}" "$IMAGE_NAME" sleep infinity
+        return
+    fi
+
+    ensure_image
+    create_config_dirs
+
+    if container_exists "$CONTAINER_NAME"; then
+        local existing_allow
+        existing_allow="$(get_container_label "$CONTAINER_NAME" "com.codex.allow_sudo")"
+        local existing_docker
+        existing_docker="$(get_container_label "$CONTAINER_NAME" "com.codex.allow_docker")"
+        if [ "$ALLOW_SUDO" = "true" ] && [ "$existing_allow" = "false" ]; then
+            fail "Container exists without --allow-sudo. Remove it with: $0 rm, then re-run: $0 --allow-sudo start"
+        fi
+        if [ "$ALLOW_SUDO" != "true" ] && [ "$existing_allow" = "true" ]; then
+            warn "Container was created with --allow-sudo enabled."
+        fi
+        if [ -z "$existing_allow" ]; then
+            warn "Existing container missing allow-sudo label; proceeding without mismatch enforcement."
+        fi
+        if [ "$ALLOW_DOCKER" = "true" ] && [ "$existing_docker" = "false" ]; then
+            fail "Container exists without --allow-docker. Remove it with: $0 rm, then re-run: $0 --allow-docker start"
+        fi
+        if [ "$ALLOW_DOCKER" != "true" ] && [ "$existing_docker" = "true" ]; then
+            warn "Container was created with --allow-docker enabled."
+        fi
+        if [ -z "$existing_docker" ]; then
+            warn "Existing container missing allow-docker label; proceeding without mismatch enforcement."
+        fi
+        if ! container_running "$CONTAINER_NAME"; then
+            echo -e "${YELLOW}Starting existing container...${NC}"
+            docker start "$CONTAINER_NAME" >/dev/null
+        fi
+        set_last_container "$CONTAINER_NAME"
+        return
+    fi
+
+    print_startup_info
+
+    if [ -z "${SSH_AUTH_SOCK:-}" ] || [ ! -S "${SSH_AUTH_SOCK:-}" ]; then
+        warn "SSH agent not detected. Set SSH_AUTH_SOCK to enable agent forwarding."
+    fi
+    if [ "$ALLOW_DOCKER" = "true" ]; then
+        warn "Enabling docker socket gives this container control of the host Docker daemon."
+    fi
+
+    local -a args
+    read -r -a args <<< "$(runtime_docker_args)"
+
+    if [ "$ALLOW_SUDO" != "true" ]; then
+        args+=( --security-opt=no-new-privileges )
+    fi
+
+    if [ "$DEBUG_MODE" = "true" ]; then
+        echo -e "${MAGENTA}DEBUG: docker run invocation:${NC}"
+        printf '%q ' docker run -d "${args[@]}" "$IMAGE_NAME" sleep infinity
+        echo
+        echo
+    fi
+
+    docker run -d "${args[@]}" "$IMAGE_NAME" sleep infinity >/dev/null
+    set_last_container "$CONTAINER_NAME"
+    echo -e "${GREEN}Runtime container ready: ${CONTAINER_NAME}${NC}"
+}
+
+stop_container() {
+    if container_running "$CONTAINER_NAME"; then
+        echo -e "${YELLOW}Stopping container...${NC}"
+        docker stop "$CONTAINER_NAME" >/dev/null
+    else
+        warn "Container is not running"
+    fi
+}
+
+remove_container() {
+    if container_exists "$CONTAINER_NAME"; then
+        echo -e "${YELLOW}Removing container...${NC}"
+        docker rm -f "$CONTAINER_NAME" >/dev/null
+        echo -e "${GREEN}Container removed${NC}"
+    else
+        warn "Container does not exist"
+    fi
+}
+
+clean_all() {
+    remove_container
+    if image_exists "$IMAGE_NAME"; then
+        echo -e "${YELLOW}Removing image...${NC}"
+        docker rmi "$IMAGE_NAME" 2>/dev/null || true
+        echo -e "${GREEN}Image removed${NC}"
+    fi
+}
+
+check_status() {
+    echo -e "${CYAN}Container Status:${NC}"
+    if [ "$DEBUG_MODE" = "true" ]; then
+        echo -e "  Resolved:  ${BLUE}${CONTAINER_NAME}${NC}"
+    fi
+
+    if image_exists "$IMAGE_NAME"; then
+        echo -e "  Image:     ${GREEN}Built${NC} (${IMAGE_NAME})"
+    else
+        echo -e "  Image:     ${YELLOW}Not built${NC} (run start or --build)"
+    fi
+
+    if container_running "$CONTAINER_NAME"; then
+        echo -e "  Container: ${GREEN}Running${NC} (${CONTAINER_NAME})"
+        local container_id
+        local uptime
+        container_id="$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+        uptime="$(docker inspect -f '{{.State.Status}} ({{.State.StartedAt}})' "$CONTAINER_NAME" 2>/dev/null || true)"
+        echo -e "  ID:        ${BLUE}${container_id}${NC}"
+        echo -e "  Uptime:    ${BLUE}${uptime}${NC}"
+        echo -e "  Volumes:"
+        docker inspect "$CONTAINER_NAME" --format='{{range .Mounts}}    {{.Source}} -> {{.Destination}}{{println}}{{end}}' 2>/dev/null || true
+    elif container_exists "$CONTAINER_NAME"; then
+        echo -e "  Container: ${YELLOW}Stopped${NC} (${CONTAINER_NAME})"
+    else
+        echo -e "  Container: ${BLUE}Not created${NC}"
+    fi
+}
+
+show_logs() {
+    if container_running "$CONTAINER_NAME"; then
+        docker logs -f "$CONTAINER_NAME"
+    else
+        fail "Container is not running. Start it with: $0 start"
+    fi
+}
+
+exec_in_container() {
+    local -a cmd=("$@")
+    local -a exec_args=()
+    local workdir=""
+    local tty_flag="-it"
+
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+        tty_flag="-i"
+    fi
+
+    if [ -n "$WORKSPACE_DIR" ]; then
+        workdir="/workspace"
+        if [ -n "$HOST_RELATIVE" ]; then
+            workdir="/workspace/$HOST_RELATIVE"
         fi
     fi
 
-    SCRIPT_DIR="$( cd "$( dirname "$script_path" )" && pwd -P )"
-    if [ ! -f "$SCRIPT_DIR/Dockerfile" ]; then
-        echo -e "${RED}Error: Dockerfile not found in $SCRIPT_DIR${NC}"
-        exit 1
+    exec_args+=( -e "CODEX_HOST_PWD=$HOST_PWD" )
+    exec_args+=( -e "CODEX_HOST_WORKSPACE=$WORKSPACE_DIR" )
+    exec_args+=( -e "CODEX_HOST_RELATIVE=$HOST_RELATIVE" )
+
+    for env in "${ENV_ARRAY[@]}"; do
+        exec_args+=( -e "$env" )
+    done
+
+    if [ -n "$workdir" ]; then
+        exec_args+=( -w "$workdir" )
     fi
 
-    cd "$SCRIPT_DIR"
-    docker build -t "$IMAGE_NAME" . || {
-        echo -e "${RED}Failed to build image${NC}"
-        exit 1
-    }
+    if [ "$DEBUG_MODE" = "true" ]; then
+        echo -e "${MAGENTA}DEBUG: docker exec invocation:${NC}"
+        printf '%q ' docker exec "$tty_flag" "${exec_args[@]}" "$CONTAINER_NAME" "${cmd[@]}"
+        echo
+        echo
+    fi
 
-    echo -e "${GREEN}✓ Image built successfully: ${IMAGE_NAME}${NC}"
+    if [ "$DRY_RUN" = "true" ]; then
+        print_dry_run docker exec "$tty_flag" "${exec_args[@]}" "$CONTAINER_NAME" "${cmd[@]}"
+        return
+    fi
+
+    docker exec "$tty_flag" "${exec_args[@]}" "$CONTAINER_NAME" "${cmd[@]}"
 }
 
-# Function to check container status
-check_status() {
-    echo -e "${CYAN}Container Status:${NC}"
+docker_sock_gid() {
+    if [ -S /var/run/docker.sock ]; then
+        stat -c %g /var/run/docker.sock 2>/dev/null || true
+    fi
+}
 
-    if docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "^${IMAGE_NAME}$"; then
-        echo -e "  Image:     ${GREEN}✓ Built${NC} (${IMAGE_NAME})"
+run_agent_container() {
+    local -a cmd=("$@")
+    local -a run=( docker run --rm --init )
+    local -a env_args=()
+    local -a vol_args=()
+    local -a docker_args=()
+    local tty_flag="-it"
+
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+        tty_flag="-i"
+    fi
+
+    ensure_agent_image
+
+    if [ -z "$AGENT_CONTAINER_NAME" ]; then
+        AGENT_CONTAINER_NAME="$(resolve_agent_container_name)"
+    fi
+
+    if [ -z "$AGENT_WORKSPACE_DIR" ]; then
+        fail "Agent workspace directory is required. Use --agent-workspace."
+    fi
+
+    if [ -n "$AGENT_CONFIG_DIR" ]; then
+        mkdir -p "$AGENT_CONFIG_DIR" || true
+    fi
+
+    if [ "$AGENT_DOCKER" = "true" ]; then
+        echo "Warning: --agent-docker grants this container control of the host Docker daemon."
+        if [ ! -S /var/run/docker.sock ]; then
+            fail "Docker socket not found at /var/run/docker.sock"
+        fi
+        vol_args+=( -v /var/run/docker.sock:/var/run/docker.sock )
+        if [ "$AGENT_ROOT" != "true" ]; then
+            local gid
+            gid="$(docker_sock_gid)"
+            if [ -n "$gid" ]; then
+                docker_args+=( --group-add "$gid" )
+            else
+                warn "Unable to detect docker.sock group; access may fail without --agent-root."
+            fi
+        fi
+    fi
+
+    if [ "$AGENT_ROOT" = "true" ]; then
+        run+=( --user 0:0 )
     else
-        echo -e "  Image:     ${YELLOW}✗ Not built${NC} (run --build)"
+        run+=( --user "$(id -u):$(id -g)" )
     fi
 
-    if docker ps --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
-        echo -e "  Container: ${GREEN}✓ Running${NC} (${CONTAINER_NAME})"
-        CONTAINER_ID=$(docker ps --filter "name=${CONTAINER_NAME}" --format "{{.ID}}")
-        UPTIME=$(docker ps --filter "name=${CONTAINER_NAME}" --format "{{.Status}}")
-        echo -e "  ID:        ${BLUE}${CONTAINER_ID}${NC}"
-        echo -e "  Uptime:    ${BLUE}${UPTIME}${NC}"
-        echo -e "  Volumes:"
-        docker inspect "$CONTAINER_NAME" --format='{{range .Mounts}}    {{.Source}} -> {{.Destination}}{{println}}{{end}}' 2>/dev/null || true
-    elif docker ps -a --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
-        echo -e "  Container: ${YELLOW}⊙ Stopped${NC} (${CONTAINER_NAME})"
-    else
-        echo -e "  Container: ${BLUE}○ Not created${NC}"
+    run+=( "$tty_flag" )
+    run+=( --name "$AGENT_CONTAINER_NAME" )
+    run+=( --workdir "$AGENT_WORKSPACE_DIR" )
+
+    vol_args+=( -v "$AGENT_WORKSPACE_DIR:$AGENT_WORKSPACE_DIR" )
+    vol_args+=( -v "$AGENT_CONFIG_DIR:$AGENT_CONFIG_DIR" )
+    vol_args+=( -v "/tmp:/tmp" )
+
+    env_args+=( -e "CODEX_WORKSPACE=$AGENT_WORKSPACE_DIR" )
+    env_args+=( -e "CODEX_CONFIG=$AGENT_CONFIG_DIR" )
+    env_args+=( -e "HOME=/home/agent" )
+
+    if [ "$AGENT_SSH_AUTH_SOCK" = "true" ] || { [ "$AGENT_SSH_AUTH_SOCK" = "auto" ] && [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; }; then
+        vol_args+=( -v "$SSH_AUTH_SOCK:/ssh-agent" )
+        env_args+=( -e "SSH_AUTH_SOCK=/ssh-agent" )
     fi
+
+    for env in "${AGENT_ENV_ARRAY[@]}"; do
+        env_args+=( -e "$env" )
+    done
+
+    if [ "$DEBUG_MODE" = "true" ]; then
+        echo -e "${MAGENTA}DEBUG: agent docker run invocation:${NC}"
+        printf '%q ' "${run[@]}" "${docker_args[@]}" "${vol_args[@]}" "${env_args[@]}" "$AGENT_IMAGE_NAME" "${cmd[@]}"
+        echo
+        echo
+    fi
+
+    if [ "$DRY_RUN" = "true" ]; then
+        print_dry_run "${run[@]}" "${docker_args[@]}" "${vol_args[@]}" "${env_args[@]}" "$AGENT_IMAGE_NAME" "${cmd[@]}"
+        return
+    fi
+
+    "${run[@]}" "${docker_args[@]}" "${vol_args[@]}" "${env_args[@]}" "$AGENT_IMAGE_NAME" "${cmd[@]}"
 }
 
-# Function to stop container
-stop_container() {
-    if docker ps --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
-        echo -e "${YELLOW}Stopping container...${NC}"
-        docker stop "$CONTAINER_NAME" 2>/dev/null || true
-    fi
-    if docker ps -a --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
-        echo -e "${YELLOW}Removing container...${NC}"
-        docker rm "$CONTAINER_NAME" 2>/dev/null || true
-    fi
-    echo -e "${GREEN}✓ Container stopped and removed${NC}"
-}
-
-# Function to clean everything
-clean_all() {
-    echo -e "${YELLOW}Cleaning up Codex Container...${NC}"
-    stop_container
-    if docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "^${IMAGE_NAME}$"; then
-        echo -e "${YELLOW}Removing image...${NC}"
-        docker rmi "$IMAGE_NAME" 2>/dev/null || true
-        echo -e "${GREEN}✓ Image removed${NC}"
-    fi
-    echo -e "${GREEN}✓ Cleanup complete${NC}"
-}
-
-# Function to show logs
-show_logs() {
-    if docker ps --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
-        docker logs -f "$CONTAINER_NAME"
-    else
-        echo -e "${RED}Error: Container is not running${NC}"
-        echo -e "${YELLOW}Start the container first with: $0 --shell${NC}"
-        exit 1
-    fi
-}
-
-# Function to execute command in running container
-exec_in_container() {
-    local cmd="$1"
-    if docker ps --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
-        docker exec -it "$CONTAINER_NAME" bash -c "$cmd"
-    else
-        echo -e "${RED}Error: Container is not running${NC}"
-        echo -e "${YELLOW}Start the container first with: $0 --shell${NC}"
-        exit 1
-    fi
-}
-
-# Function to run container (argv-safe)
-run_container() {
-    local -a cmd=( "$@" )
+run_ephemeral_container() {
+    local -a cmd=("$@")
     local interactive="-it"
     local network_mode=""
     local -a extra_volumes=()
@@ -246,7 +1029,6 @@ run_container() {
     local -a env_args=()
     local workdir="/workspace"
 
-    # Determine if we need TTY / networking based on the command
     if [[ "${cmd[0]}" == "codex" ]]; then
         local codex_noninteractive="false"
         for arg in "${cmd[@]:1}"; do
@@ -263,41 +1045,25 @@ run_container() {
         else
             interactive="-it"
         fi
-
-        # Use host networking for codex (OAuth and reduced friction)
         network_mode="--network host"
     elif [[ "${cmd[0]}" != "bash" ]]; then
         interactive="-i"
     fi
 
-    # Create config directory if it doesn't exist
-    if [ ! -d "$CONFIG_DIR" ]; then
-        echo -e "${YELLOW}Creating config directory: $CONFIG_DIR${NC}"
-        mkdir -p "$CONFIG_DIR"
-    fi
+    create_config_dirs
 
-    # Create config subdirectories (persisted on host)
-    mkdir -p "$CONFIG_DIR/npm" "$CONFIG_DIR/codex" "$CONFIG_DIR/history" 2>/dev/null || true
-
-    # Optional: mount host ~/.codex (share auth/state with host)
     if [ "$HOST_CODEX_DIR" = "true" ]; then
         mkdir -p "$HOME/.codex" 2>/dev/null || true
         chmod 755 "$HOME/.codex" 2>/dev/null || true
         extra_volumes+=( -v "$HOME/.codex:/home/codex/.codex" )
     fi
 
-    # Check if image exists
-    if ! docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "^${IMAGE_NAME}$"; then
-        echo -e "${YELLOW}Image not found. Building...${NC}"
-        build_image
-    fi
+    ensure_image
 
-    # Prepare environment variables (-e ...)
     for env in "${ENV_ARRAY[@]}"; do
         env_args+=( -e "$env" )
     done
 
-    # Add host context env vars
     env_args+=( -e "CODEX_HOST_PWD=$HOST_PWD" )
     env_args+=( -e "CODEX_HOST_WORKSPACE=$WORKSPACE_DIR" )
     if [ -n "$HOST_RELATIVE" ]; then
@@ -307,28 +1073,41 @@ run_container() {
         env_args+=( -e "CODEX_HOST_RELATIVE=" )
     fi
 
-    # Autoload .env (or use explicit env-file)
     if [ -n "$ENV_FILE" ]; then
-        docker_args+=( --env-file "$ENV_FILE" )
+        for env in "${ENV_ARRAY[@]}"; do
+            env_args+=( -e "$env" )
+        done
     fi
 
-    # Display startup info
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}  Starting Codex Container v${VERSION}  ${NC}"
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BLUE}Workspace:${NC} ${YELLOW}$WORKSPACE_DIR${NC}"
-    echo -e "${BLUE}Config:${NC}    ${YELLOW}$CONFIG_DIR${NC}"
-    echo -e "${BLUE}Container:${NC} ${YELLOW}$CONTAINER_NAME${NC}"
-    if [ -n "$ENV_FILE" ]; then
-        echo -e "${BLUE}Env file:${NC}  ${YELLOW}$ENV_FILE${NC}"
+    if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; then
+        extra_volumes+=( -v "$SSH_AUTH_SOCK:/ssh-agent" )
+        env_args+=( -e "SSH_AUTH_SOCK=/ssh-agent" )
     fi
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
+
+    if [ "$ALLOW_DOCKER" = "true" ]; then
+        warn "Enabling docker socket gives this container control of the host Docker daemon."
+        if [ ! -S /var/run/docker.sock ]; then
+            fail "Docker socket not found at /var/run/docker.sock"
+        fi
+        extra_volumes+=( -v /var/run/docker.sock:/var/run/docker.sock )
+        local gid
+        gid="$(docker_sock_gid)"
+        if [ -n "$gid" ]; then
+            docker_args+=( --group-add "$gid" )
+        else
+            warn "Unable to detect docker.sock group; access may fail."
+        fi
+    fi
 
     local -a run=( docker run --rm --init $interactive )
-    run+=( --name "$CONTAINER_NAME" )
+    if [ "$CONTAINER_NAME_EXPLICIT" = "true" ]; then
+        run+=( --name "$CONTAINER_NAME" )
+    fi
     if [ -n "$network_mode" ]; then
         run+=( $network_mode )
+    fi
+    if [ "$ALLOW_SUDO" != "true" ]; then
+        run+=( --security-opt=no-new-privileges )
     fi
     run+=( -v "$WORKSPACE_DIR:/workspace" )
     run+=( -v "$CONFIG_DIR:/config" )
@@ -336,6 +1115,10 @@ run_container() {
     run+=( --workdir "$workdir" )
     run+=( -e "USER_UID=$(id -u)" )
     run+=( -e "USER_GID=$(id -g)" )
+    run+=( -e "ALLOW_SUDO=$ALLOW_SUDO" )
+    run+=( -e "PIPX_HOME=/config/pipx" )
+    run+=( -e "PIPX_BIN_DIR=/config/pipx/bin" )
+    run+=( -e "PIP_CACHE_DIR=/config/pip-cache" )
     run+=( "${extra_volumes[@]}" )
     run+=( "${docker_args[@]}" )
     run+=( "${env_args[@]}" )
@@ -349,64 +1132,193 @@ run_container() {
         echo
     fi
 
+    if [ "$DRY_RUN" = "true" ]; then
+        print_dry_run "${run[@]}"
+        return
+    fi
+
     "${run[@]}"
+}
+
+prune_images() {
+    local keep_tag="codex-container:${VERSION}"
+    local -a images=()
+    local line
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        images+=( "$line" )
+    done < <(docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | awk '$1 ~ /^codex-container:/')
+
+    if [ "${#images[@]}" -eq 0 ]; then
+        echo "No codex-container images found."
+        return
+    fi
+
+    local -a remove_tags=()
+    local entry
+    for entry in "${images[@]}"; do
+        local tag
+        tag="${entry%% *}"
+        if [ "$tag" != "$keep_tag" ]; then
+            remove_tags+=( "$tag" )
+        fi
+    done
+
+    if [ "${#remove_tags[@]}" -eq 0 ]; then
+        echo "Only current image present (${keep_tag}). Nothing to prune."
+        return
+    fi
+
+    echo "Images to remove:"
+    printf '  %s\n' "${remove_tags[@]}"
+
+    if [ "$PRUNE_YES" != "true" ]; then
+        if [ -t 0 ]; then
+            printf 'Remove these images? [y/N] '
+            read -r reply
+            case "$reply" in
+                y|Y|yes|YES) ;;
+                *) echo "Aborted."; return ;;
+            esac
+        else
+            fail "Confirmation required. Re-run with --yes."
+        fi
+    fi
+
+    if [ "$DRY_RUN" = "true" ]; then
+        print_dry_run docker rmi "${remove_tags[@]}"
+        return
+    fi
+
+    docker rmi "${remove_tags[@]}"
 }
 
 # --------------------------
 # Argument parsing
 # --------------------------
-ENV_ARRAY=()
-EXEC_COMMAND=""
-NODE_FILE=""
-ACTION=""
 
-# Command payloads (argv-safe)
-NPM_ARGS=()
-NPX_ARGS=()
-CODEX_ARGS=()
-COMMAND_ARGS=()
-
-# Host path context
-HOST_RELATIVE=""
+load_version
+resolve_workspace
+resolve_config_dir
+resolve_image_name
 
 while [[ $# -gt 0 ]]; do
+    if [ "$ACTION" = "agent" ] && [[ "${1:-}" != -* ]]; then
+        AGENT_COMMAND_ARGS=( "$@" )
+        break
+    fi
     case "$1" in
         -h|--help) show_help; exit 0 ;;
         --version) show_version; exit 0 ;;
-        -w|--workspace) WORKSPACE_DIR="$2"; shift 2 ;;
+        -w|--workspace) WORKSPACE_DIR="$2"; WORKSPACE_EXPLICIT="true"; WORKSPACE_CLI_EXPLICIT="true"; shift 2 ;;
         -c|--config) CONFIG_DIR="$2"; shift 2 ;;
-        -n|--name) CONTAINER_NAME="$2"; shift 2 ;;
+        -n|--name) CONTAINER_NAME="$2"; CONTAINER_NAME_EXPLICIT="true"; shift 2 ;;
         -e|--env) ENV_ARRAY+=("$2"); shift 2 ;;
         --env-file) ENV_FILE="$2"; shift 2 ;;
+        --agent-env) AGENT_ENV_ARRAY+=("$2"); shift 2 ;;
+        --agent-env-file) AGENT_ENV_FILE="$2"; shift 2 ;;
         --debug) DEBUG_MODE="true"; shift ;;
+        --dry-run) DRY_RUN="true"; shift ;;
         --host-codex-dir) HOST_CODEX_DIR="true"; shift ;;
+        --allow-sudo) ALLOW_SUDO="true"; shift ;;
+        --allow-docker) ALLOW_DOCKER="true"; shift ;;
+        --ephemeral) EPHEMERAL="true"; shift ;;
+        --yes) PRUNE_YES="true"; shift ;;
+        --agent-docker) AGENT_DOCKER="true"; shift ;;
+        --agent-image) AGENT_IMAGE_NAME="$2"; AGENT_IMAGE_EXPLICIT="true"; shift 2 ;;
+        --agent-shell) AGENT_SHELL="true"; shift ;;
+        --agent-workspace) AGENT_WORKSPACE_DIR="$2"; AGENT_WORKSPACE_EXPLICIT="true"; shift 2 ;;
+        --agent-config) AGENT_CONFIG_DIR="$2"; AGENT_CONFIG_EXPLICIT="true"; shift 2 ;;
+        --agent-ssh-auth-sock) AGENT_SSH_AUTH_SOCK="true"; shift ;;
+        --agent-root) AGENT_ROOT="true"; shift ;;
         --build) ACTION="build"; shift ;;
-        --shell) ACTION="shell"; shift ;;
+        --start) ACTION="start"; shift ;;
         --stop) ACTION="stop"; shift ;;
+        --rm) ACTION="rm"; shift ;;
         --clean) ACTION="clean"; shift ;;
         --logs) ACTION="logs"; shift ;;
         --status) ACTION="status"; shift ;;
-        --exec) ACTION="exec"; EXEC_COMMAND="$2"; shift 2 ;;
+        --shell) ACTION="shell"; shift ;;
+        --exec)
+            ACTION="exec"
+            shift
+            if [ "${1:-}" = "--" ]; then
+                shift
+                EXEC_ARGS=( "$@" )
+            else
+                EXEC_COMMAND_STRING="${1:-}"
+            fi
+            break
+            ;;
         --npm) ACTION="npm"; shift; NPM_ARGS=( "$@" ); break ;;
         --node) ACTION="node"; NODE_FILE="$2"; shift 2 ;;
         --npx) ACTION="npx"; shift; NPX_ARGS=( "$@" ); break ;;
         --codex) ACTION="codex"; shift; CODEX_ARGS=( "$@" ); break ;;
-        codex) ACTION="codex"; shift; CODEX_ARGS=( "$@" ); break ;;
+        start|stop|rm|status|shell|logs|clean|prune-images)
+            if [ "$ACTION" = "agent" ]; then
+                AGENT_COMMAND_ARGS=( "$@" )
+                break
+            fi
+            ACTION="$1"; shift ;;
+        agent)
+            ACTION="agent"; shift ;;
+        exec)
+            ACTION="exec"; shift
+            if [ "${1:-}" = "--" ]; then
+                shift
+            fi
+            EXEC_ARGS=( "$@" )
+            break
+            ;;
+        codex)
+            ACTION="codex"; shift; CODEX_ARGS=( "$@" ); break ;;
+        npm)
+            ACTION="npm"; shift; NPM_ARGS=( "$@" ); break ;;
+        npx)
+            ACTION="npx"; shift; NPX_ARGS=( "$@" ); break ;;
+        pipx)
+            ACTION="pipx"; shift; PIPX_ARGS=( "$@" ); break ;;
+        mcp)
+            ACTION="mcp"; shift; MCP_ARGS=( "$@" ); break ;;
+        node)
+            ACTION="node"; NODE_FILE="$2"; shift 2 ;;
+        --)
+            shift
+            if [ "$ACTION" = "agent" ]; then
+                AGENT_COMMAND_ARGS=( "$@" )
+            else
+                COMMAND_ARGS=( "$@" )
+            fi
+            break
+            ;;
         *)
+            if [ "$ACTION" = "agent" ]; then
+                AGENT_COMMAND_ARGS=( "$@" )
+                break
+            fi
             COMMAND_ARGS=( "$@" )
             break
             ;;
     esac
 done
 
-# Default target: codex when the first payload arg is a flag.
+# Override with environment variables if set after parsing
+resolve_workspace
+resolve_config_dir
+resolve_image_name
+resolve_agent_workspace
+resolve_agent_config_dir
+resolve_agent_image_name
+
+# Normalize workspace/config/env file
+WORKSPACE_DIR="$(expand_tilde "$WORKSPACE_DIR")"
+CONFIG_DIR="$(expand_tilde "$CONFIG_DIR")"
+normalize_env_file
+normalize_agent_env_file
+
+# Determine action for leading flags default to codex
 if [ -z "$ACTION" ] && [ "${#COMMAND_ARGS[@]}" -gt 0 ]; then
     case "${COMMAND_ARGS[0]}" in
-        codex)
-            ACTION="codex"
-            CODEX_ARGS=( "${COMMAND_ARGS[@]:1}" )
-            COMMAND_ARGS=()
-            ;;
         -*)
             ACTION="codex"
             CODEX_ARGS=( "${COMMAND_ARGS[@]}" )
@@ -415,105 +1327,234 @@ if [ -z "$ACTION" ] && [ "${#COMMAND_ARGS[@]}" -gt 0 ]; then
     esac
 fi
 
-# Override with environment variables if set
-WORKSPACE_DIR="${CODEX_WORKSPACE:-$WORKSPACE_DIR}"
-CONFIG_DIR="${CODEX_CONFIG:-$CONFIG_DIR}"
-IMAGE_NAME="${CODEX_IMAGE:-$IMAGE_NAME}"
+# Default behavior
+if [ -z "$ACTION" ] && [ "${#COMMAND_ARGS[@]}" -eq 0 ]; then
+    ACTION="codex"
+    CODEX_ARGS=()
+fi
 
-# Normalize ENV_FILE to absolute path if explicitly set
-if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
-    ENV_FILE="$(cd "$(dirname "$ENV_FILE")" && pwd -P)/$(basename "$ENV_FILE")"
+# Validate workspace when needed
+case "$ACTION" in
+    build|clean|status|stop|rm|logs|prune-images)
+        ;;
+    agent)
+        if [ -z "$AGENT_WORKSPACE_DIR" ]; then
+            fail "Agent workspace directory is required. Use --agent-workspace."
+        fi
+        if [ ! -d "$AGENT_WORKSPACE_DIR" ]; then
+            fail "Agent workspace directory does not exist: $AGENT_WORKSPACE_DIR"
+        fi
+        AGENT_WORKSPACE_DIR="$(cd "$AGENT_WORKSPACE_DIR" && pwd -P)"
+        if [ -n "$AGENT_CONFIG_DIR" ]; then
+            AGENT_CONFIG_DIR="$(expand_tilde "$AGENT_CONFIG_DIR")"
+            AGENT_CONFIG_DIR="$(abs_path "$AGENT_CONFIG_DIR")"
+        fi
+        ;;
+    exec)
+        if [ "$CONTAINER_NAME_EXPLICIT" = "true" ] && [ "$WORKSPACE_CLI_EXPLICIT" != "true" ]; then
+            WORKSPACE_DIR=""
+        else
+            if [ -z "$WORKSPACE_DIR" ]; then
+                fail "Workspace directory is required. Use --workspace or set CODEX_WORKSPACE."
+            fi
+            if [ ! -d "$WORKSPACE_DIR" ]; then
+                fail "Workspace directory does not exist: $WORKSPACE_DIR"
+            fi
+            WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd -P)"
+            resolve_host_relative
+        fi
+        ;;
+    *)
+        if [ -z "$WORKSPACE_DIR" ]; then
+            fail "Workspace directory is required. Use --workspace or set CODEX_WORKSPACE."
+        fi
+        if [ ! -d "$WORKSPACE_DIR" ]; then
+            fail "Workspace directory does not exist: $WORKSPACE_DIR"
+        fi
+        WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd -P)"
+        resolve_host_relative
+        ;;
+ esac
+
+# Autoload env file (when appropriate)
+autoload_env_file
+normalize_env_file
+
+if [ -n "$ENV_FILE" ]; then
+    load_env_file_into_array "$ENV_FILE"
+fi
+
+if [ -n "$AGENT_ENV_FILE" ]; then
+    load_env_file_into_agent_array "$AGENT_ENV_FILE"
 fi
 
 # Add OpenAI / Git env passthrough if present on host
 if [ -n "${OPENAI_API_KEY:-}" ]; then
     ENV_ARRAY+=("OPENAI_API_KEY=$OPENAI_API_KEY")
-fi
-if [ -n "${GIT_USER_NAME:-}" ]; then
-    ENV_ARRAY+=("GIT_USER_NAME=$GIT_USER_NAME")
-fi
-if [ -n "${GIT_USER_EMAIL:-}" ]; then
-    ENV_ARRAY+=("GIT_USER_EMAIL=$GIT_USER_EMAIL")
+    AGENT_ENV_ARRAY+=("OPENAI_API_KEY=$OPENAI_API_KEY")
 fi
 
-# Validate workspace directory (unless building/cleaning/status/stopping)
-if [ "$ACTION" != "build" ] && [ "$ACTION" != "clean" ] && [ "$ACTION" != "status" ] && [ "$ACTION" != "stop" ]; then
-    if [ ! -d "$WORKSPACE_DIR" ]; then
-        echo -e "${RED}Error: Workspace directory does not exist: $WORKSPACE_DIR${NC}"
-        exit 1
-    fi
-    WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" && pwd -P)"
+# For management commands, prefer last container if workspace not explicitly set
+case "$ACTION" in
+    status|stop|rm|logs|clean)
+        if [ "$WORKSPACE_EXPLICIT" != "true" ] && [ -z "$CONTAINER_NAME" ]; then
+            PREFER_LAST_CONTAINER="true"
+            WORKSPACE_DIR=""
+        fi
+        ;;
+esac
 
-    # Compute host-relative path so container workdir can mirror where you are
-    if [[ "$HOST_PWD" == "$WORKSPACE_DIR" ]]; then
-        HOST_RELATIVE=""
-    elif [[ "$HOST_PWD" == "$WORKSPACE_DIR/"* ]]; then
-        HOST_RELATIVE="${HOST_PWD#"$WORKSPACE_DIR/"}"
-    else
-        HOST_RELATIVE=""
-    fi
-fi
+# Check Docker availability
+ensure_docker
 
-# Convert config dir to absolute path (handle ~)
-if [[ "$CONFIG_DIR" == ~* ]]; then
-    CONFIG_DIR="${CONFIG_DIR/#\~/$HOME}"
-fi
-CONFIG_DIR="$(cd "$(dirname "$CONFIG_DIR")" 2>/dev/null && pwd -P)/$(basename "$CONFIG_DIR")" || CONFIG_DIR="$HOME/.config/codex-container/config"
-
-# Determine env-file behavior:
-# Precedence: --env-file > .env in host cwd (if inside workspace) > .env at workspace root
-if [ -z "$ENV_FILE" ] && [ "$ACTION" != "build" ] && [ "$ACTION" != "clean" ]; then
-    if [ -n "$HOST_RELATIVE" ] && [ -f "$HOST_PWD/.env" ]; then
-        ENV_FILE="$HOST_PWD/.env"
-    elif [ -f "$WORKSPACE_DIR/.env" ]; then
-        ENV_FILE="$WORKSPACE_DIR/.env"
-    fi
-fi
-
-# Check if Docker is running
-if ! docker info > /dev/null 2>&1; then
-    echo -e "${RED}Error: Docker is not running or not accessible${NC}"
-    echo "Please start Docker and try again."
-    exit 1
-fi
+# Resolve container metadata for actions that need it
+case "$ACTION" in
+    build|prune-images)
+        ;;
+    clean|status|stop|rm|logs)
+        if [ -z "$CONTAINER_NAME" ]; then
+            CONTAINER_NAME="$(resolve_container_name)"
+        fi
+        ;;
+    agent)
+        if [ -z "$AGENT_CONTAINER_NAME" ]; then
+            AGENT_CONTAINER_NAME="$(resolve_agent_container_name)"
+        fi
+        ;;
+    *)
+        collect_git_identity
+        if [ -z "$CONTAINER_NAME" ]; then
+            CONTAINER_NAME="$(resolve_container_name)"
+        fi
+        ;;
+esac
 
 # Execute action
 case "$ACTION" in
-    build) build_image ;;
-    stop) stop_container ;;
-    clean) clean_all ;;
-    logs) show_logs ;;
-    status) check_status ;;
-    shell) run_container bash ;;
-    exec) exec_in_container "$EXEC_COMMAND" ;;
-    npm)
-        if [ "${#NPM_ARGS[@]}" -gt 0 ]; then
-            run_container npm "${NPM_ARGS[@]}"
+    build)
+        build_image
+        ;;
+    start)
+        start_container
+        ;;
+    stop)
+        stop_container
+        ;;
+    rm)
+        remove_container
+        ;;
+    clean)
+        clean_all
+        ;;
+    prune-images)
+        prune_images
+        ;;
+    logs)
+        show_logs
+        ;;
+    status)
+        check_status
+        ;;
+    shell)
+        if [ "$EPHEMERAL" = "true" ]; then
+            run_ephemeral_container bash
         else
-            run_container npm
+            start_container
+            exec_in_container bash
         fi
         ;;
-    node) run_container node "$NODE_FILE" ;;
-    npx)
-        if [ "${#NPX_ARGS[@]}" -gt 0 ]; then
-            run_container npx "${NPX_ARGS[@]}"
+    exec)
+        if [ -z "$EXEC_COMMAND_STRING" ] && [ "${#EXEC_ARGS[@]}" -eq 0 ]; then
+            fail "exec requires a command. Example: codex-container exec -- ls -la"
+        fi
+        if [ "$EPHEMERAL" = "true" ]; then
+            if [ -n "$EXEC_COMMAND_STRING" ]; then
+                run_ephemeral_container bash -lc "$EXEC_COMMAND_STRING"
+            else
+                run_ephemeral_container "${EXEC_ARGS[@]}"
+            fi
         else
-            run_container npx
+            start_container
+            if [ -n "$EXEC_COMMAND_STRING" ]; then
+                exec_in_container bash -lc "$EXEC_COMMAND_STRING"
+            else
+                exec_in_container "${EXEC_ARGS[@]}"
+            fi
+        fi
+        ;;
+    agent)
+        if [ "$AGENT_SHELL" = "true" ] || [ "${#AGENT_COMMAND_ARGS[@]}" -eq 0 ]; then
+            run_agent_container bash
+        else
+            run_agent_container "${AGENT_COMMAND_ARGS[@]}"
+        fi
+        ;;
+    npm)
+        if [ "$EPHEMERAL" = "true" ]; then
+            run_ephemeral_container npm "${NPM_ARGS[@]}"
+        else
+            start_container
+            exec_in_container npm "${NPM_ARGS[@]}"
+        fi
+        ;;
+    npx)
+        if [ "$EPHEMERAL" = "true" ]; then
+            run_ephemeral_container npx "${NPX_ARGS[@]}"
+        else
+            start_container
+            exec_in_container npx "${NPX_ARGS[@]}"
+        fi
+        ;;
+    node)
+        if [ -z "$NODE_FILE" ]; then
+            fail "node requires a file path"
+        fi
+        if [ "$EPHEMERAL" = "true" ]; then
+            run_ephemeral_container node "$NODE_FILE"
+        else
+            start_container
+            exec_in_container node "$NODE_FILE"
+        fi
+        ;;
+    pipx)
+        if [ "$EPHEMERAL" = "true" ]; then
+            run_ephemeral_container pipx "${PIPX_ARGS[@]}"
+        else
+            start_container
+            exec_in_container pipx "${PIPX_ARGS[@]}"
+        fi
+        ;;
+    mcp)
+        if [ "$EPHEMERAL" = "true" ]; then
+            run_ephemeral_container codex mcp "${MCP_ARGS[@]}"
+        else
+            start_container
+            exec_in_container codex mcp "${MCP_ARGS[@]}"
         fi
         ;;
     codex)
-        if [ "${#CODEX_ARGS[@]}" -gt 0 ]; then
-            run_container codex "${CODEX_ARGS[@]}"
+        if [ "$EPHEMERAL" = "true" ]; then
+            run_ephemeral_container codex "${CODEX_ARGS[@]}"
         else
-            run_container codex
+            start_container
+            exec_in_container codex "${CODEX_ARGS[@]}"
         fi
         ;;
     *)
         if [ "${#COMMAND_ARGS[@]}" -gt 0 ]; then
-            run_container "${COMMAND_ARGS[@]}"
+            if [ "$EPHEMERAL" = "true" ]; then
+                run_ephemeral_container "${COMMAND_ARGS[@]}"
+            else
+                start_container
+                exec_in_container "${COMMAND_ARGS[@]}"
+            fi
         else
-            # Default behavior - run codex. Use --shell for shell
-            run_container codex
+            if [ "$EPHEMERAL" = "true" ]; then
+                run_ephemeral_container codex
+            else
+                start_container
+                exec_in_container codex
+            fi
         fi
         ;;
-esac
+ esac

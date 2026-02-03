@@ -1,0 +1,35 @@
+ARG CODEX_VERSION=dev
+FROM docker:27.0.3-cli
+
+ARG CODEX_VERSION
+LABEL org.opencontainers.image.title="codex-container-agent"
+LABEL version="${CODEX_VERSION}"
+
+RUN apk add --no-cache \\
+        bash \\
+        coreutils \\
+        curl \\
+        docker-cli \\
+        findutils \\
+        gawk \\
+        git \\
+        grep \\
+        jq \\
+        python3 \\
+        py3-pip \\
+        sed \\
+        shadow \\
+        util-linux \\
+    && if ! apk add --no-cache pipx; then \\
+        python3 -m pip install --no-cache-dir pipx==1.5.0; \\
+    fi \\
+    && adduser -D -h /home/agent -s /bin/bash agent \\
+    && mkdir -p /home/agent /config/pipx /config/pip-cache \\
+    && chown -R agent:agent /home/agent /config
+
+ENV PIPX_HOME=/config/pipx \\
+    PIPX_BIN_DIR=/config/pipx/bin \\
+    PIP_CACHE_DIR=/config/pip-cache \\
+    PATH="/config/pipx/bin:$PATH"
+
+WORKDIR /workspace
