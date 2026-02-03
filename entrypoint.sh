@@ -67,6 +67,11 @@ init_config() {
     mkdir -p "$PIPX_BIN_DIR" 2>/dev/null || true
 
     export GIT_CONFIG_GLOBAL=/config/git/gitconfig
+    mkdir -p /config/git 2>/dev/null || true
+    if [ ! -f /config/git/gitconfig ]; then
+        touch /config/git/gitconfig 2>/dev/null || true
+        chmod 600 /config/git/gitconfig 2>/dev/null || true
+    fi
 
     # Check if this is first run
     if [ ! -f /config/.initialized ]; then
@@ -140,6 +145,17 @@ init_config() {
         ln -s /config/history/bash_history /home/codex/.bash_history
     fi
 
+    if [ ! -L /home/codex/.gitconfig ] || [ "$(readlink /home/codex/.gitconfig 2>/dev/null || true)" != "/config/git/gitconfig" ]; then
+        rm -f /home/codex/.gitconfig 2>/dev/null || true
+        ln -s /config/git/gitconfig /home/codex/.gitconfig
+    fi
+
+    mkdir -p /home/codex/.config/git 2>/dev/null || true
+    if [ ! -L /home/codex/.config/git/config ] || [ "$(readlink /home/codex/.config/git/config 2>/dev/null || true)" != "/config/git/gitconfig" ]; then
+        rm -f /home/codex/.config/git/config 2>/dev/null || true
+        ln -s /config/git/gitconfig /home/codex/.config/git/config
+    fi
+
     # Set up OpenAI API key if provided
     if [ -n "${OPENAI_API_KEY:-}" ]; then
         export OPENAI_API_KEY="$OPENAI_API_KEY"
@@ -150,13 +166,9 @@ init_config() {
         echo -e "${BLUE}OpenAI API key loaded from config${NC}"
     fi
 
-    # Set up git config if provided
-    if [ -n "$CODEX_GIT_NAME" ]; then
-        git config --global user.name "$CODEX_GIT_NAME" || true
-    fi
-    if [ -n "$CODEX_GIT_EMAIL" ]; then
-        git config --global user.email "$CODEX_GIT_EMAIL" || true
-    fi
+    # Set up git config (empty values are allowed to clear prior config)
+    git config --global user.name "$CODEX_GIT_NAME" || true
+    git config --global user.email "$CODEX_GIT_EMAIL" || true
 }
 
 # Function to display welcome message

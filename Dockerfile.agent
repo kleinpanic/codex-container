@@ -9,6 +9,7 @@ RUN apk add --no-cache \\
         bash \\
         coreutils \\
         curl \\
+        docker-cli \\
         findutils \\
         gawk \\
         git \\
@@ -16,10 +17,12 @@ RUN apk add --no-cache \\
         jq \\
         python3 \\
         py3-pip \\
-        py3-pipx \\
         sed \\
         shadow \\
         util-linux \\
+    && if ! apk add --no-cache pipx; then \\
+        python3 -m pip install --no-cache-dir pipx==1.5.0; \\
+    fi \\
     && adduser -D -h /home/agent -s /bin/bash agent \\
     && mkdir -p /home/agent /config/pipx /config/pip-cache \\
     && chown -R agent:agent /home/agent /config

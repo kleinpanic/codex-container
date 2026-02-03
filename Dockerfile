@@ -15,6 +15,7 @@ RUN apk add --no-cache \
     bash \
     ca-certificates \
     curl \
+    docker-cli \
     git \
     jq \
     nodejs \
@@ -22,7 +23,7 @@ RUN apk add --no-cache \
     openssh-client \
     python3 \
     py3-pip \
-    py3-pipx \
+    pipx \
     shadow \
     sudo \
     tzdata \

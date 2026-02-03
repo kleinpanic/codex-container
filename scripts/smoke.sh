@@ -8,6 +8,7 @@ workspace1="$(mktemp -d /tmp/codex-ws1.XXXXXX)"
 workspace2="$(mktemp -d /tmp/codex-ws2.XXXXXX)"
 container1="cc-smoke-1"
 container2="cc-smoke-2"
+container3="cc-smoke-docker"
 
 strip_ansi() {
     sed -E 's/\x1B\[[0-9;]*[mK]//g'
@@ -19,6 +20,9 @@ cleanup() {
     fi
     if [ -n "$container2" ]; then
         "$codex" --name "$container2" rm >/dev/null 2>&1 || true
+    fi
+    if [ -n "$container3" ]; then
+        "$codex" --name "$container3" rm >/dev/null 2>&1 || true
     fi
     rm -rf "$workspace1" "$workspace2"
 }
@@ -65,6 +69,18 @@ echo "Persistence check (workspace2)..."
 echo "pipx check..."
 "$codex" -w "$workspace1" --name "$container1" pipx list >/dev/null
 
+echo "Git config origin check..."
+origin_name="$($codex -w "$workspace1" --name "$container1" exec -- git config --global --show-origin user.name | tr -d '\r')"
+origin_email="$($codex -w "$workspace1" --name "$container1" exec -- git config --global --show-origin user.email | tr -d '\r')"
+if ! printf '%s\n' "$origin_name" | grep -q "/config/git/gitconfig"; then
+    echo "Git user.name origin missing /config/git/gitconfig: $origin_name" >&2
+    exit 1
+fi
+if ! printf '%s\n' "$origin_email" | grep -q "/config/git/gitconfig"; then
+    echo "Git user.email origin missing /config/git/gitconfig: $origin_email" >&2
+    exit 1
+fi
+
 host_name="$(git config --global user.name 2>/dev/null || true)"
 host_email="$(git config --global user.email 2>/dev/null || true)"
 if [ -n "$host_name" ]; then
@@ -103,5 +119,9 @@ if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; then
     echo "SSH agent forwarding check..."
     "$codex" -w "$workspace1" --name "$container1" exec -- sh -lc 'test -S "$SSH_AUTH_SOCK"' >/dev/null
 fi
+
+echo "Runtime docker socket check..."
+"$codex" -w "$workspace1" --name "$container3" --allow-docker start >/dev/null
+"$codex" -w "$workspace1" --name "$container3" exec -- sh -lc 'docker version >/dev/null && docker ps >/dev/null'
 
 echo "Smoke tests passed"

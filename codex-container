@@ -50,6 +50,9 @@ DEBUG_MODE="false"
 HOST_CODEX_DIR="false"
 ALLOW_SUDO="false"
 EPHEMERAL="false"
+ALLOW_DOCKER="false"
+DRY_RUN="false"
+PRUNE_YES="false"
 
 # Command payloads (argv-safe)
 ENV_ARRAY=()
@@ -96,6 +99,12 @@ info() {
 
 warn() {
     echo -e "${YELLOW}Warning:${NC} $*"
+}
+
+print_dry_run() {
+    printf 'DRY RUN: '
+    printf '%q ' "$@"
+    printf '\n'
 }
 
 resolve_script_dir() {
@@ -200,6 +209,9 @@ get_container_label() {
 }
 
 ensure_docker() {
+    if [ "$DRY_RUN" = "true" ]; then
+        return
+    fi
     if ! docker info >/dev/null 2>&1; then
         fail "Docker is not running or not accessible. Please start Docker and try again."
     fi
@@ -470,20 +482,16 @@ collect_git_identity() {
     elif command -v git >/dev/null 2>&1; then
         email="$(git config --global user.email 2>/dev/null || true)"
     fi
-    if [ -n "$name" ]; then
-        ENV_ARRAY+=("CODEX_GIT_NAME=$name")
-    fi
-    if [ -n "$email" ]; then
-        ENV_ARRAY+=("CODEX_GIT_EMAIL=$email")
-    fi
+    ENV_ARRAY+=("CODEX_GIT_NAME=$name")
+    ENV_ARRAY+=("CODEX_GIT_EMAIL=$email")
 
     if [ -z "$name" ] || [ -z "$email" ]; then
         local marker
         marker="$(state_dir)/git-identity-warning"
         if [ ! -f "$marker" ]; then
             warn "Host git identity not fully set (user.name or user.email missing)."
-            mkdir -p "$(dirname "$marker")"
-            touch "$marker"
+            mkdir -p "$(dirname "$marker")" 2>/dev/null || true
+            touch "$marker" 2>/dev/null || true
         fi
     fi
 }
@@ -504,6 +512,11 @@ print_startup_info() {
         echo -e "${BLUE}Sudo:${NC}      ${YELLOW}enabled${NC}"
     else
         echo -e "${BLUE}Sudo:${NC}      ${YELLOW}disabled${NC}"
+    fi
+    if [ "$ALLOW_DOCKER" = "true" ]; then
+        echo -e "${BLUE}Docker:${NC}    ${YELLOW}enabled${NC}"
+    else
+        echo -e "${BLUE}Docker:${NC}    ${YELLOW}disabled${NC}"
     fi
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
@@ -535,8 +548,11 @@ ${YELLOW}OPTIONS:${NC}
     ${CYAN}--agent-root${NC}                Run agent container as root (required for some docker.sock setups)
     ${CYAN}--host-codex-dir${NC}            (Optional) Mount host ~/.codex for auth/state instead of /config persistence
     ${CYAN}--allow-sudo${NC}                Allow sudo/apk in the runtime container (opt-in, at start time)
+    ${CYAN}--allow-docker${NC}              Allow runtime container access to host Docker socket (opt-in)
     ${CYAN}--ephemeral${NC}                 Run a one-shot container (legacy --rm behavior)
     ${CYAN}--debug${NC}                     Print resolved docker invocation (no secrets redacted)
+    ${CYAN}--dry-run${NC}                   Print docker commands without running them
+    ${CYAN}--yes${NC}                       Auto-confirm prompts (for prune-images)
     ${CYAN}-h, --help${NC}                  Show this help message
     ${CYAN}--version${NC}                   Show version information
 
@@ -544,11 +560,13 @@ ${YELLOW}SUBCOMMANDS:${NC}
     ${CYAN}start${NC}                       Create or ensure the runtime container exists
     ${CYAN}stop${NC}                        Stop the runtime container
     ${CYAN}rm${NC}                          Remove the runtime container
+    ${CYAN}clean${NC}                       Remove runtime container and image
     ${CYAN}status${NC}                      Check container status
     ${CYAN}shell${NC}                       Open interactive shell in runtime container
     ${CYAN}exec -- <command>${NC}           Execute command in runtime container
     ${CYAN}logs${NC}                        Show container logs
     ${CYAN}agent -- <command>${NC}          Execute command in agent container (defaults to shell)
+    ${CYAN}prune-images${NC}                Remove old codex-container images (keeps current version)
 
 ${YELLOW}SHORTCUTS:${NC}
     ${CYAN}codex [args]${NC}                Run codex (default target when args start with '-')
@@ -577,6 +595,9 @@ ${YELLOW}EXAMPLES:${NC}
     ${BLUE}# Run a command in an agent container with Docker access${NC}
     codex-container agent --agent-docker -- ./scripts/smoke.sh
 
+    ${BLUE}# Prune older codex-container images${NC}
+    codex-container prune-images --yes
+
 ${YELLOW}ENVIRONMENT VARIABLES:${NC}
     ${CYAN}CODEX_WORKSPACE${NC}        Override default workspace directory
     ${CYAN}CODEX_CONFIG${NC}           Override default config directory
@@ -602,6 +623,7 @@ ${YELLOW}NOTES:${NC}
     - Configuration is mounted at /config in the container
     - Global npm packages are preserved across sessions
     - Default mode does not allow sudo or apk installs. Use --allow-sudo to opt in.
+    - Use --allow-docker to expose the host Docker socket to the runtime container.
 
 ${GREEN}For more information, see README.md${NC}
 EOF
@@ -633,6 +655,11 @@ build_image() {
         fail "Dockerfile not found in $SCRIPT_DIR. If you installed a symlink, run from the repo or set CODEX_IMAGE."
     fi
 
+    if [ "$DRY_RUN" = "true" ]; then
+        print_dry_run docker build --build-arg "CODEX_VERSION=$VERSION" -t "$IMAGE_NAME" "$SCRIPT_DIR"
+        return
+    fi
+
     (cd "$SCRIPT_DIR" && docker build --build-arg CODEX_VERSION="$VERSION" -t "$IMAGE_NAME" .) || {
         fail "Failed to build image"
     }
@@ -645,6 +672,11 @@ build_agent_image() {
 
     if [ ! -f "$SCRIPT_DIR/Dockerfile.agent" ]; then
         fail "Dockerfile.agent not found in $SCRIPT_DIR. If you installed a symlink, run from the repo or set --agent-image."
+    fi
+
+    if [ "$DRY_RUN" = "true" ]; then
+        print_dry_run docker build --build-arg "CODEX_VERSION=$VERSION" -f "$SCRIPT_DIR/Dockerfile.agent" -t "$AGENT_IMAGE_NAME" "$SCRIPT_DIR"
+        return
     fi
 
     (cd "$SCRIPT_DIR" && docker build --build-arg CODEX_VERSION="$VERSION" -f Dockerfile.agent -t "$AGENT_IMAGE_NAME" .) || {
@@ -672,6 +704,7 @@ runtime_docker_args() {
     args+=( --name "$CONTAINER_NAME" )
     args+=( --label "com.codex.workspace=$WORKSPACE_DIR" )
     args+=( --label "com.codex.allow_sudo=$ALLOW_SUDO" )
+    args+=( --label "com.codex.allow_docker=$ALLOW_DOCKER" )
     args+=( --network host )
     args+=( -v "$WORKSPACE_DIR:/workspace" )
     args+=( -v "$CONFIG_DIR:/config" )
@@ -694,16 +727,45 @@ runtime_docker_args() {
     for env in "${ENV_ARRAY[@]}"; do
         args+=( -e "$env" )
     done
+    if [ "$ALLOW_DOCKER" = "true" ]; then
+        if [ ! -S /var/run/docker.sock ]; then
+            fail "Docker socket not found at /var/run/docker.sock"
+        fi
+        args+=( -v /var/run/docker.sock:/var/run/docker.sock )
+        local gid
+        gid="$(docker_sock_gid)"
+        if [ -n "$gid" ]; then
+            args+=( --group-add "$gid" )
+        else
+            warn "Unable to detect docker.sock group; access may fail."
+        fi
+    fi
     echo "${args[@]}"
 }
 
 start_container() {
+    if [ "$DRY_RUN" = "true" ]; then
+        create_config_dirs
+        local -a args
+        read -r -a args <<< "$(runtime_docker_args)"
+        if [ "$ALLOW_SUDO" != "true" ]; then
+            args+=( --security-opt=no-new-privileges )
+        fi
+        if [ "$ALLOW_DOCKER" = "true" ]; then
+            warn "Enabling docker socket gives this container control of the host Docker daemon."
+        fi
+        print_dry_run docker run -d "${args[@]}" "$IMAGE_NAME" sleep infinity
+        return
+    fi
+
     ensure_image
     create_config_dirs
 
     if container_exists "$CONTAINER_NAME"; then
         local existing_allow
         existing_allow="$(get_container_label "$CONTAINER_NAME" "com.codex.allow_sudo")"
+        local existing_docker
+        existing_docker="$(get_container_label "$CONTAINER_NAME" "com.codex.allow_docker")"
         if [ "$ALLOW_SUDO" = "true" ] && [ "$existing_allow" = "false" ]; then
             fail "Container exists without --allow-sudo. Remove it with: $0 rm, then re-run: $0 --allow-sudo start"
         fi
@@ -712,6 +774,15 @@ start_container() {
         fi
         if [ -z "$existing_allow" ]; then
             warn "Existing container missing allow-sudo label; proceeding without mismatch enforcement."
+        fi
+        if [ "$ALLOW_DOCKER" = "true" ] && [ "$existing_docker" = "false" ]; then
+            fail "Container exists without --allow-docker. Remove it with: $0 rm, then re-run: $0 --allow-docker start"
+        fi
+        if [ "$ALLOW_DOCKER" != "true" ] && [ "$existing_docker" = "true" ]; then
+            warn "Container was created with --allow-docker enabled."
+        fi
+        if [ -z "$existing_docker" ]; then
+            warn "Existing container missing allow-docker label; proceeding without mismatch enforcement."
         fi
         if ! container_running "$CONTAINER_NAME"; then
             echo -e "${YELLOW}Starting existing container...${NC}"
@@ -725,6 +796,9 @@ start_container() {
 
     if [ -z "${SSH_AUTH_SOCK:-}" ] || [ ! -S "${SSH_AUTH_SOCK:-}" ]; then
         warn "SSH agent not detected. Set SSH_AUTH_SOCK to enable agent forwarding."
+    fi
+    if [ "$ALLOW_DOCKER" = "true" ]; then
+        warn "Enabling docker socket gives this container control of the host Docker daemon."
     fi
 
     local -a args
@@ -847,6 +921,11 @@ exec_in_container() {
         echo
     fi
 
+    if [ "$DRY_RUN" = "true" ]; then
+        print_dry_run docker exec "$tty_flag" "${exec_args[@]}" "$CONTAINER_NAME" "${cmd[@]}"
+        return
+    fi
+
     docker exec "$tty_flag" "${exec_args[@]}" "$CONTAINER_NAME" "${cmd[@]}"
 }
 
@@ -933,6 +1012,11 @@ run_agent_container() {
         echo
     fi
 
+    if [ "$DRY_RUN" = "true" ]; then
+        print_dry_run "${run[@]}" "${docker_args[@]}" "${vol_args[@]}" "${env_args[@]}" "$AGENT_IMAGE_NAME" "${cmd[@]}"
+        return
+    fi
+
     "${run[@]}" "${docker_args[@]}" "${vol_args[@]}" "${env_args[@]}" "$AGENT_IMAGE_NAME" "${cmd[@]}"
 }
 
@@ -1000,6 +1084,21 @@ run_ephemeral_container() {
         env_args+=( -e "SSH_AUTH_SOCK=/ssh-agent" )
     fi
 
+    if [ "$ALLOW_DOCKER" = "true" ]; then
+        warn "Enabling docker socket gives this container control of the host Docker daemon."
+        if [ ! -S /var/run/docker.sock ]; then
+            fail "Docker socket not found at /var/run/docker.sock"
+        fi
+        extra_volumes+=( -v /var/run/docker.sock:/var/run/docker.sock )
+        local gid
+        gid="$(docker_sock_gid)"
+        if [ -n "$gid" ]; then
+            docker_args+=( --group-add "$gid" )
+        else
+            warn "Unable to detect docker.sock group; access may fail."
+        fi
+    fi
+
     local -a run=( docker run --rm --init $interactive )
     if [ "$CONTAINER_NAME_EXPLICIT" = "true" ]; then
         run+=( --name "$CONTAINER_NAME" )
@@ -1033,7 +1132,65 @@ run_ephemeral_container() {
         echo
     fi
 
+    if [ "$DRY_RUN" = "true" ]; then
+        print_dry_run "${run[@]}"
+        return
+    fi
+
     "${run[@]}"
+}
+
+prune_images() {
+    local keep_tag="codex-container:${VERSION}"
+    local -a images=()
+    local line
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        images+=( "$line" )
+    done < <(docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | awk '$1 ~ /^codex-container:/')
+
+    if [ "${#images[@]}" -eq 0 ]; then
+        echo "No codex-container images found."
+        return
+    fi
+
+    local -a remove_tags=()
+    local entry
+    for entry in "${images[@]}"; do
+        local tag
+        tag="${entry%% *}"
+        if [ "$tag" != "$keep_tag" ]; then
+            remove_tags+=( "$tag" )
+        fi
+    done
+
+    if [ "${#remove_tags[@]}" -eq 0 ]; then
+        echo "Only current image present (${keep_tag}). Nothing to prune."
+        return
+    fi
+
+    echo "Images to remove:"
+    printf '  %s\n' "${remove_tags[@]}"
+
+    if [ "$PRUNE_YES" != "true" ]; then
+        if [ -t 0 ]; then
+            printf 'Remove these images? [y/N] '
+            read -r reply
+            case "$reply" in
+                y|Y|yes|YES) ;;
+                *) echo "Aborted."; return ;;
+            esac
+        else
+            fail "Confirmation required. Re-run with --yes."
+        fi
+    fi
+
+    if [ "$DRY_RUN" = "true" ]; then
+        print_dry_run docker rmi "${remove_tags[@]}"
+        return
+    fi
+
+    docker rmi "${remove_tags[@]}"
 }
 
 # --------------------------
@@ -1061,9 +1218,12 @@ while [[ $# -gt 0 ]]; do
         --agent-env) AGENT_ENV_ARRAY+=("$2"); shift 2 ;;
         --agent-env-file) AGENT_ENV_FILE="$2"; shift 2 ;;
         --debug) DEBUG_MODE="true"; shift ;;
+        --dry-run) DRY_RUN="true"; shift ;;
         --host-codex-dir) HOST_CODEX_DIR="true"; shift ;;
         --allow-sudo) ALLOW_SUDO="true"; shift ;;
+        --allow-docker) ALLOW_DOCKER="true"; shift ;;
         --ephemeral) EPHEMERAL="true"; shift ;;
+        --yes) PRUNE_YES="true"; shift ;;
         --agent-docker) AGENT_DOCKER="true"; shift ;;
         --agent-image) AGENT_IMAGE_NAME="$2"; AGENT_IMAGE_EXPLICIT="true"; shift 2 ;;
         --agent-shell) AGENT_SHELL="true"; shift ;;
@@ -1094,7 +1254,7 @@ while [[ $# -gt 0 ]]; do
         --node) ACTION="node"; NODE_FILE="$2"; shift 2 ;;
         --npx) ACTION="npx"; shift; NPX_ARGS=( "$@" ); break ;;
         --codex) ACTION="codex"; shift; CODEX_ARGS=( "$@" ); break ;;
-        start|stop|rm|status|shell|logs)
+        start|stop|rm|status|shell|logs|clean|prune-images)
             if [ "$ACTION" = "agent" ]; then
                 AGENT_COMMAND_ARGS=( "$@" )
                 break
@@ -1175,7 +1335,7 @@ fi
 
 # Validate workspace when needed
 case "$ACTION" in
-    build|clean|status|stop|rm|logs)
+    build|clean|status|stop|rm|logs|prune-images)
         ;;
     agent)
         if [ -z "$AGENT_WORKSPACE_DIR" ]; then
@@ -1249,7 +1409,7 @@ ensure_docker
 
 # Resolve container metadata for actions that need it
 case "$ACTION" in
-    build)
+    build|prune-images)
         ;;
     clean|status|stop|rm|logs)
         if [ -z "$CONTAINER_NAME" ]; then
@@ -1285,6 +1445,9 @@ case "$ACTION" in
         ;;
     clean)
         clean_all
+        ;;
+    prune-images)
+        prune_images
         ;;
     logs)
         show_logs
