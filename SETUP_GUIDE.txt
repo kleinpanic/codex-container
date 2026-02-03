@@ -21,11 +21,16 @@ INSTALLATION:
    tar -xzf codex-container.tar.gz
    cd codex-container
 
-2. Make the wrapper executable (already done in archive):
-   chmod +x codex-container
+2. Install (user-local recommended):
+   make install-user
 
 3. Build the container:
    ./codex-container --build
+
+UNINSTALL:
+----------
+- User-local: make uninstall-user
+- System-wide: make uninstall
 
 USAGE EXAMPLES:
 ---------------
@@ -58,11 +63,10 @@ USAGE EXAMPLES:
 
 OPTIONAL - SYSTEM-WIDE INSTALLATION:
 -------------------------------------
-To use from anywhere:
-sudo ln -s $(pwd)/codex-container /usr/local/bin/
+make install
 
-Then you can just run:
-codex-container shell
+Confirm which binary is used:
+command -v codex-container
 
 CONFIGURATION:
 --------------
@@ -87,6 +91,7 @@ FEATURES REFERENCE:
 - Log viewing (logs)
 - Environment variables (-e flag)
 - Default no-sudo mode with opt-in via --allow-sudo
+- Optional host Docker socket access for runtime container (--allow-docker)
 - Alpine Linux for minimal size
 - Pre-installed development tools
 

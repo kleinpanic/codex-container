@@ -3,7 +3,7 @@
 
 VERSION := $(shell cat VERSION 2>/dev/null)
 
-.PHONY: help build run shell start stop rm clean status logs install package compose-up compose-down compose-logs dev-rebuild test smoke version-check
+.PHONY: help build run shell start stop rm clean status logs install install-user uninstall uninstall-user install-symlink reinstall reinstall-user prune-images completions ci-local package compose-up compose-down compose-logs dev-rebuild test smoke version-check
 
 # Default target
 help:
@@ -19,7 +19,13 @@ help:
 	@echo "  make clean        - Remove container and image"
 	@echo "  make status       - Show container status"
 	@echo "  make logs         - Show container logs"
-	@echo "  make install      - Install wrapper script to /usr/local/bin"
+	@echo "  make install-user - Install wrapper to ~/.local/bin"
+	@echo "  make uninstall-user - Remove wrapper from ~/.local/bin"
+	@echo "  make install      - Install wrapper to /usr/local/bin"
+	@echo "  make uninstall    - Remove wrapper from /usr/local/bin"
+	@echo "  make install-symlink - Install symlink to /usr/local/bin"
+	@echo "  make prune-images - Remove old codex-container images (keeps current version)"
+	@echo "  make ci-local     - Run local CI checks without Docker"
 	@echo "  make package      - Create distributable tar.gz archive"
 	@echo "  make smoke        - Build + run smoke tests"
 	@echo "  make version-check - Verify version consistency"
@@ -57,22 +63,83 @@ rm:
 
 # Clean everything
 clean:
-	@./codex-container --clean
+	@./codex-container clean
 
 # Show status
 status:
-	@./codex-container --status
+	@./codex-container status
 
 # Show logs
 logs:
-	@./codex-container --logs
+	@./codex-container logs
 
-# Install wrapper script
+# Install wrapper script (system)
 install:
 	@echo "Installing codex-container to /usr/local/bin..."
 	@chmod +x codex-container
-	@sudo ln -sf $(PWD)/codex-container /usr/local/bin/codex-container
-	@echo "Installation complete. You can now use 'codex-container' from anywhere."
+	@if [ "$$EUID" -ne 0 ]; then \
+		sudo install -Dm755 codex-container /usr/local/bin/codex-container 2>/dev/null || \
+			{ sudo mkdir -p /usr/local/bin && sudo install -m 755 codex-container /usr/local/bin/codex-container; }; \
+	else \
+		install -Dm755 codex-container /usr/local/bin/codex-container 2>/dev/null || \
+			{ mkdir -p /usr/local/bin && install -m 755 codex-container /usr/local/bin/codex-container; }; \
+	fi
+	@echo "Installed: /usr/local/bin/codex-container"
+
+# Install wrapper script (user-local)
+install-user:
+	@echo "Installing codex-container to $$HOME/.local/bin..."
+	@chmod +x codex-container
+	@install -Dm755 codex-container "$$HOME/.local/bin/codex-container" 2>/dev/null || \
+		{ mkdir -p "$$HOME/.local/bin" && install -m 755 codex-container "$$HOME/.local/bin/codex-container"; }
+	@echo "Installed: $$HOME/.local/bin/codex-container"
+	@case ":$$PATH:" in \
+		*:"$$HOME/.local/bin":*) ;; \
+		*) echo "Note: $$HOME/.local/bin is not on PATH. Add it to your shell profile."; \
+	esac
+
+uninstall-user:
+	@rm -f "$$HOME/.local/bin/codex-container"
+	@echo "Removed: $$HOME/.local/bin/codex-container (if it existed)"
+
+uninstall:
+	@if [ "$$EUID" -ne 0 ]; then \
+		sudo rm -f /usr/local/bin/codex-container; \
+	else \
+		rm -f /usr/local/bin/codex-container; \
+	fi
+	@echo "Removed: /usr/local/bin/codex-container (if it existed)"
+
+install-symlink:
+	@echo "Installing codex-container symlink to /usr/local/bin..."
+	@if [ "$$EUID" -ne 0 ]; then \
+		sudo ln -sf "$(PWD)/codex-container" /usr/local/bin/codex-container; \
+	else \
+		ln -sf "$(PWD)/codex-container" /usr/local/bin/codex-container; \
+	fi
+	@echo "Symlinked: /usr/local/bin/codex-container -> $(PWD)/codex-container"
+
+reinstall-user: uninstall-user install-user
+
+reinstall: uninstall install
+
+prune-images:
+	@./codex-container prune-images
+
+completions:
+	@echo "Completions live in ./completions"
+	@echo "Bash: source completions/codex-container.bash"
+	@echo "Zsh: add ./completions to fpath or copy completions/_codex-container"
+
+ci-local:
+	@bash -n codex-container entrypoint.sh scripts/*.sh
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck codex-container entrypoint.sh scripts/*.sh; \
+	else \
+		echo "shellcheck not installed; skipping"; \
+	fi
+	@./scripts/check-version.sh
+	@./scripts/no-docker-tests.sh
 
 # Create distributable package
 package:

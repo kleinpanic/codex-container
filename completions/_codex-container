@@ -1,0 +1,28 @@
+#compdef codex-container
+
+_arguments -s \
+  '(-w --workspace)'{-w,--workspace}'[Workspace directory]:path:_files -/' \
+  '(-c --config)'{-c,--config}'[Config directory]:path:_files -/' \
+  '(-n --name)'{-n,--name}'[Container name]:name:' \
+  '(-e --env)'{-e,--env}'[Environment variable KEY=VALUE]:' \
+  '--env-file[Env file]:file:_files' \
+  '--agent-docker[Enable docker socket for agent container]' \
+  '--agent-image[Agent image]:image:' \
+  '--agent-shell[Open shell in agent container]' \
+  '--agent-workspace[Agent workspace]:path:_files -/' \
+  '--agent-config[Agent config]:path:_files -/' \
+  '--agent-ssh-auth-sock[Forward SSH_AUTH_SOCK into agent container]' \
+  '--agent-env[Agent env var KEY=VALUE]:' \
+  '--agent-env-file[Agent env file]:file:_files' \
+  '--agent-root[Run agent container as root]' \
+  '--host-codex-dir[Mount host ~/.codex into runtime container]' \
+  '--allow-sudo[Allow sudo/apk in runtime container]' \
+  '--allow-docker[Allow runtime container access to host Docker socket]' \
+  '--ephemeral[Run an ephemeral container]' \
+  '--debug[Print docker invocation]' \
+  '--dry-run[Print docker commands without running them]' \
+  '--yes[Auto-confirm prompts]' \
+  '(-h --help)'{-h,--help}'[Show help]' \
+  '--version[Show version]' \
+  '1:subcommand:(start stop rm status shell exec logs agent clean prune-images)' \
+  '*::args:->args'

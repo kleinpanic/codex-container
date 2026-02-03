@@ -17,6 +17,9 @@ This repo gives you a single command (`codex-container`) that behaves like a per
 - SSH agent forwarding: If `SSH_AUTH_SOCK` is set, it is forwarded into the container.
 - Git identity propagation: Host `git config --global user.name/email` is applied to container global git config.
 - Agent container mode: Run an isolated tooling container with optional host Docker socket passthrough.
+- Runtime Docker opt-in: `--allow-docker` exposes the host Docker socket only when requested.
+- Shell completions for bash/zsh.
+- `prune-images` for project-scoped image cleanup and `--dry-run` for safe inspection.
 
 ---
 
@@ -44,24 +47,46 @@ This repo gives you a single command (`codex-container`) that behaves like a per
 
 ## Installation
 
-### Local usage (recommended during development)
-
-Run it from the repo:
+### User-local install (recommended)
 
 ```bash
-chmod +x ./codex-container ./entrypoint.sh
-./codex-container --build
+make install-user
+command -v codex-container
+codex-container --version
 ```
 
-### Install into PATH (symlink)
-
-This keeps your wrapper in one place while still being callable from anywhere:
+Uninstall:
 
 ```bash
-sudo ln -sf "$(pwd)/codex-container" /usr/local/bin/codex-container
+make uninstall-user
 ```
 
-If you use the symlink approach, `--build` still works because the wrapper resolves the real script directory.
+If `~/.local/bin` is not on PATH, add it in your shell profile.
+
+### System-wide install (optional)
+
+```bash
+make install
+command -v codex-container
+```
+
+Uninstall:
+
+```bash
+make uninstall
+```
+
+If you want a symlink instead of a copy:
+
+```bash
+make install-symlink
+```
+
+Confirm which binary is used:
+
+```bash
+command -v codex-container
+```
 
 ---
 
@@ -81,6 +106,9 @@ If you use the symlink approach, `--build` still works because the wrapper resol
 
 # Show status for the current workspace container
 ./codex-container status
+
+# Prune old codex-container images (keeps current VERSION tag)
+./codex-container prune-images
 ```
 
 ### Codex runs
@@ -178,6 +206,8 @@ To opt into sudo for a specific runtime container:
 
 If a container already exists without sudo, remove it and recreate with `--allow-sudo`.
 
+Runtime Docker socket access is disabled by default. If you enable `--allow-docker`, the runtime container can control the host Docker daemon.
+
 Agent mode is separate from the runtime container. If you enable `--agent-docker`, the agent container can control the host Docker daemon.
 
 ---
@@ -245,6 +275,44 @@ If you prefer to supply values explicitly, you can set `CODEX_GIT_NAME` and `COD
 
 ---
 
+## Runtime Docker Socket (opt-in)
+
+The runtime container can optionally access the host Docker daemon. This is disabled by default.
+
+```bash
+./codex-container --allow-docker start
+```
+
+Warning: `--allow-docker` grants the runtime container control of the host Docker daemon.
+
+---
+
+## Shell Completions
+
+Completion scripts live under `completions/`.
+
+```bash
+# Bash (one-time for current shell)
+source completions/codex-container.bash
+```
+
+```bash
+# Zsh (add to fpath or copy into a site-functions dir)
+fpath=(\"$(pwd)/completions\" $fpath)
+autoload -Uz compinit && compinit
+```
+
+---
+
+## Dry Run
+
+Use `--dry-run` to print the resolved Docker commands without executing them:
+
+```bash
+./codex-container --dry-run start
+./codex-container --dry-run exec -- ls -la
+```
+
 ## Environment Variables
 
 These are wrapper controls and passthrough helpers:
@@ -294,6 +362,7 @@ codex-container/
 ├── codex-container
 ├── entrypoint.sh
 ├── codex.config.toml
+├── completions/
 ├── Makefile
 ├── SETUP_GUIDE.txt
 ├── scripts/agent-smoke.sh
