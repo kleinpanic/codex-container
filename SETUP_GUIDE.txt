@@ -1,18 +1,18 @@
 CODEX CONTAINER - QUICK SETUP GUIDE
 ====================================
 
-Your isolated Docker environment for OpenAI Codex is ready!
+Your isolated Docker environment for OpenAI Codex is ready.
 
 WHAT'S INCLUDED:
 ----------------
-✓ Alpine Linux-based Docker container
-✓ Node.js and npm pre-installed
-✓ Workspace mounting capability
-✓ Configuration persistence
-✓ User ID mapping for file permissions
-✓ Bash wrapper script with full functionality
-✓ Docker Compose support
-✓ Non-root user with sudo access
+- Alpine Linux-based Docker container
+- Node.js and npm pre-installed
+- Workspace mounting capability
+- Configuration persistence
+- User ID mapping for file permissions (when sudo is allowed)
+- Bash wrapper script with full functionality
+- Docker Compose support
+- Optional sudo mode for OS-level installs
 
 INSTALLATION:
 -------------
@@ -29,26 +29,32 @@ INSTALLATION:
 
 USAGE EXAMPLES:
 ---------------
-# Run in current directory
-./codex-container
+# Start a persistent runtime container
+./codex-container start
+
+# Run Codex in current directory
+./codex-container --search
 
 # Open interactive shell
-./codex-container --shell
+./codex-container shell
 
 # Mount specific workspace
-./codex-container -w /path/to/your/project --shell
+./codex-container -w /path/to/your/project start
 
-# Install npm packages globally (persisted)
-./codex-container --npm install -g @openai/codex
+# Run npm packages globally (persisted)
+./codex-container npm install -g @openai/codex
 
 # Run Node.js scripts
-./codex-container --node yourscript.js
+./codex-container exec -- node yourscript.js
 
 # Set OpenAI API key
-./codex-container -e OPENAI_API_KEY=sk-your-key --shell
+./codex-container -e OPENAI_API_KEY=sk-your-key --search
 
 # Check status
-./codex-container --status
+./codex-container status
+
+# Use sudo/apk (opt-in)
+./codex-container --allow-sudo start
 
 OPTIONAL - SYSTEM-WIDE INSTALLATION:
 -------------------------------------
@@ -56,33 +62,33 @@ To use from anywhere:
 sudo ln -s $(pwd)/codex-container /usr/local/bin/
 
 Then you can just run:
-codex-container --shell
+codex-container shell
 
 CONFIGURATION:
 --------------
-Config is stored in: ~/.config/codex-container/
+Config is stored in: ~/.config/codex-container/config
 - Save API key: echo "sk-key" > ~/.config/codex-container/config/openai_key
 - Git config is preserved across sessions
-- NPM global packages are preserved
+- npm global packages are preserved
+- pipx installs are preserved under /config/pipx
 
 DOCKER COMPOSE:
 ---------------
-Alternative method using docker-compose:
-1. Edit docker-compose.yml to set your API key
-2. Run: docker-compose up -d
+Alternative method using docker compose:
+1. Copy .env.example to .env and set CODEX_VERSION
+2. Run: docker compose up -d
 3. Attach: docker attach codex-container-runtime
 
-FEATURES vs REFERENCE:
-----------------------
-✓ Workspace mounting (-w flag)
-✓ Config persistence (-c flag)  
-✓ Container management (--build, --stop, --clean)
-✓ Status checking (--status)
-✓ Log viewing (--logs)
-✓ Environment variables (-e flag)
-✓ Non-root user with UID mapping
-✓ Alpine Linux for minimal size
-✓ Pre-installed development tools
+FEATURES REFERENCE:
+-------------------
+- Workspace mounting (-w flag)
+- Config persistence (-c flag)
+- Container management (start/stop/rm/status)
+- Log viewing (logs)
+- Environment variables (-e flag)
+- Default no-sudo mode with opt-in via --allow-sudo
+- Alpine Linux for minimal size
+- Pre-installed development tools
 
 NOTE ON @openai/codex:
 -----------------------
@@ -99,7 +105,7 @@ development environment regardless of the Codex package status.
 TROUBLESHOOTING:
 ----------------
 - Docker not running: Start Docker Desktop/daemon
-- Permission denied: Check file ownership and Docker group
+- Permission denied: Run with --allow-sudo if you need UID mapping
 - Port conflicts: Stop other containers or change ports
 - Build fails: Check Docker disk space and network
 

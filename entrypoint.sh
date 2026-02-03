@@ -2,13 +2,19 @@
 # Entrypoint script for Codex Container
 # Handles user ID mapping and environment setup
 
-set -e
+set -euo pipefail
 
 # Color codes for output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+: "${USER_UID:=}"
+: "${USER_GID:=}"
+: "${ALLOW_SUDO:=}"
+: "${CODEX_GIT_NAME:=}"
+: "${CODEX_GIT_EMAIL:=}"
 
 is_mountpoint() {
     local path="$1"
@@ -17,19 +23,34 @@ is_mountpoint() {
     grep -qs " $(printf '%s' "$path" | sed 's/ /\\040/g') " /proc/mounts
 }
 
+can_sudo() {
+    if [ "$ALLOW_SUDO" != "true" ]; then
+        return 1
+    fi
+    if ! command -v sudo >/dev/null 2>&1; then
+        return 1
+    fi
+    if sudo -n true >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
 # Function to setup user permissions
 setup_user() {
-    if [ -n "${USER_UID:-}" ] && [ -n "${USER_GID:-}" ]; then
+    if [ -n "$USER_UID" ] && [ -n "$USER_GID" ]; then
         if [ "$USER_UID" != "1000" ] || [ "$USER_GID" != "1000" ]; then
-            echo -e "${YELLOW}Adjusting user permissions...${NC}"
-            sudo usermod -u "$USER_UID" codex 2>/dev/null || true
-            sudo groupmod -g "$USER_GID" codex 2>/dev/null || true
-            sudo chown -R codex:codex /home/codex 2>/dev/null || true
+            if can_sudo; then
+                echo -e "${YELLOW}Adjusting user permissions...${NC}"
+                sudo usermod -u "$USER_UID" codex 2>/dev/null || true
+                sudo groupmod -g "$USER_GID" codex 2>/dev/null || true
+                sudo chown -R codex:codex /home/codex 2>/dev/null || true
 
-            # Fix .codex directory permissions specifically (skip if it is a mount)
-            if [ -d /home/codex/.codex ] && ! is_mountpoint /home/codex/.codex; then
-                sudo chown -R "$USER_UID:$USER_GID" /home/codex/.codex 2>/dev/null || true
-                sudo chmod -R 755 /home/codex/.codex 2>/dev/null || true
+                # Fix .codex directory permissions specifically (skip if it is a mount)
+                if [ -d /home/codex/.codex ] && ! is_mountpoint /home/codex/.codex; then
+                    sudo chown -R "$USER_UID:$USER_GID" /home/codex/.codex 2>/dev/null || true
+                    sudo chmod -R 755 /home/codex/.codex 2>/dev/null || true
+                fi
             fi
         fi
     fi
@@ -38,7 +59,14 @@ setup_user() {
 # Function to initialize configuration
 init_config() {
     # Ensure /config exists and base structure is present
-    mkdir -p /config /config/npm /config/codex /config/history 2>/dev/null || true
+    mkdir -p /config /config/npm /config/codex /config/history /config/pipx /config/pip-cache /config/git 2>/dev/null || true
+
+    export PIPX_HOME=/config/pipx
+    export PIPX_BIN_DIR=/config/pipx/bin
+    export PIP_CACHE_DIR=/config/pip-cache
+    mkdir -p "$PIPX_BIN_DIR" 2>/dev/null || true
+
+    export GIT_CONFIG_GLOBAL=/config/git/gitconfig
 
     # Check if this is first run
     if [ ! -f /config/.initialized ]; then
@@ -62,7 +90,6 @@ init_config() {
             if [ -L /home/codex/.codex ]; then
                 true
             elif [ -e /home/codex/.codex ]; then
-                # If it's a real directory/file, move it into config on first run
                 rm -rf /config/codex 2>/dev/null || true
                 mv /home/codex/.codex /config/codex 2>/dev/null || true
             fi
@@ -89,19 +116,11 @@ init_config() {
         rm -f /home/codex/.bash_history 2>/dev/null || true
         ln -s /config/history/bash_history /home/codex/.bash_history
 
-        # Set up git config if provided
-        if [ -n "${GIT_USER_NAME:-}" ]; then
-            git config --global user.name "$GIT_USER_NAME"
-        fi
-        if [ -n "${GIT_USER_EMAIL:-}" ]; then
-            git config --global user.email "$GIT_USER_EMAIL"
-        fi
-
         echo -e "${GREEN}Configuration initialized${NC}"
     fi
 
     # Ensure persistent directories/symlinks exist even after first run
-    mkdir -p /config/npm /config/codex /config/history 2>/dev/null || true
+    mkdir -p /config/npm /config/codex /config/history /config/pipx /config/pip-cache /config/git 2>/dev/null || true
 
     if [ ! -L /home/codex/.npm ]; then
         rm -rf /home/codex/.npm 2>/dev/null || true
@@ -130,6 +149,14 @@ init_config() {
         OPENAI_API_KEY="$(cat /config/openai_key)"
         echo -e "${BLUE}OpenAI API key loaded from config${NC}"
     fi
+
+    # Set up git config if provided
+    if [ -n "$CODEX_GIT_NAME" ]; then
+        git config --global user.name "$CODEX_GIT_NAME" || true
+    fi
+    if [ -n "$CODEX_GIT_EMAIL" ]; then
+        git config --global user.email "$CODEX_GIT_EMAIL" || true
+    fi
 }
 
 # Function to display welcome message
@@ -153,7 +180,7 @@ show_welcome() {
     echo -e "${BLUE}NPM:${NC}       ${YELLOW}$(npm --version)${NC}"
 
     if command -v codex >/dev/null 2>&1; then
-        echo -e "${BLUE}Codex:${NC}     ${GREEN}Installed ✓${NC}"
+        echo -e "${BLUE}Codex:${NC}     ${GREEN}Installed${NC}"
     else
         echo -e "${BLUE}Codex:${NC}     ${YELLOW}Not installed (package may require manual setup)${NC}"
     fi

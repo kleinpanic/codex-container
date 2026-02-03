@@ -1,0 +1,25 @@
+# Changelog
+
+## 1.1.0 - 2026-02-03
+
+Summary:
+- Introduced per-workspace persistent runtime containers with new `start/stop/rm/status/shell/exec` commands.
+- Added explicit sudo opt-in (`--allow-sudo`) with no-new-privileges enabled by default.
+- Added pipx/pip cache persistence and MCP wrappers.
+- Added SSH agent forwarding and host git identity propagation.
+- Added version single-source-of-truth via `VERSION` and a `version-check` script.
+
+Previous behavior (1.0.0):
+- Default invocation ran `codex` in a one-shot container.
+- `--shell` launched an ephemeral container.
+- `--name` defaulted to a single hard-coded container name (`codex-container-runtime`).
+- Persistence relied on a host-mounted `/config` and a named npm volume; container filesystem was discarded via `--rm`.
+- No `no-new-privileges` policy was applied by default; sudo was installed and intended to work.
+
+Details:
+- The runtime container name is now workspace-scoped (deterministic hash) unless `--name` is provided.
+- Management commands (`status`, `logs`, `exec`) accept `--name` and fall back to the last used container.
+- `CODEX_WORKSPACE=~/...` now expands reliably; script directory resolution works when invoked via symlink.
+- Added `--ephemeral` to explicitly request legacy `docker run --rm` behavior.
+- Git identity is pulled from host `git config --global` and stored in `/config/git/gitconfig` in the container.
+- Default base image now includes git/ssh, curl, jq, python/pip/pipx, and build tools.
