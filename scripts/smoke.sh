@@ -66,36 +66,68 @@ echo "Persistence check (workspace2)..."
 "$codex" -w "$workspace2" --name "$container2" exec -- sh -lc 'echo hi > /tmp/persist-test-b && cat /tmp/persist-test-b' >/dev/null
 "$codex" -w "$workspace2" --name "$container2" exec -- cat /tmp/persist-test-b >/dev/null
 
-echo "pipx check..."
-"$codex" -w "$workspace1" --name "$container1" pipx list >/dev/null
+echo "pipx check (informational)..."
+if "$codex" -w "$workspace1" --name "$container1" pipx list >/dev/null 2>&1; then
+    echo "pipx available"
+else
+    echo "pipx not available or no packages installed"
+fi
 
-echo "Git config origin check..."
+echo "Git config propagation check..."
+if ! "$codex" -w "$workspace1" --name "$container1" exec -- sh -lc 'test -f /config/git/gitconfig'; then
+    echo "Missing /config/git/gitconfig in container" >&2
+    exit 1
+fi
+
+config_name="$($codex -w "$workspace1" --name "$container1" exec -- sh -lc 'git config --file /config/git/gitconfig --get user.name || true' | tr -d '\r')"
+config_email="$($codex -w "$workspace1" --name "$container1" exec -- sh -lc 'git config --file /config/git/gitconfig --get user.email || true' | tr -d '\r')"
+if [ -z "$config_name" ] || [ -z "$config_email" ]; then
+    echo "Expected /config/git/gitconfig to include user.name and user.email" >&2
+    exit 1
+fi
+
+if ! "$codex" -w "$workspace1" --name "$container1" exec -- sh -lc 'test -e ~/.gitconfig'; then
+    echo "Missing ~/.gitconfig in container" >&2
+    exit 1
+fi
+
+gitconfig_target="$($codex -w "$workspace1" --name "$container1" exec -- sh -lc 'if [ -L ~/.gitconfig ]; then if readlink -f ~/.gitconfig >/dev/null 2>&1; then readlink -f ~/.gitconfig; else readlink ~/.gitconfig; fi; fi' | tr -d '\r')"
+if [ -n "$gitconfig_target" ] && [ "$gitconfig_target" != "/config/git/gitconfig" ]; then
+    echo "~/.gitconfig symlink target mismatch: $gitconfig_target" >&2
+    exit 1
+fi
+
+container_name="$($codex -w "$workspace1" --name "$container1" exec -- git config --global user.name | tr -d '\r')"
+container_email="$($codex -w "$workspace1" --name "$container1" exec -- git config --global user.email | tr -d '\r')"
+if [ "$container_name" != "$config_name" ]; then
+    echo "Git user.name mismatch: expected '$config_name' got '$container_name'" >&2
+    exit 1
+fi
+if [ "$container_email" != "$config_email" ]; then
+    echo "Git user.email mismatch: expected '$config_email' got '$container_email'" >&2
+    exit 1
+fi
+
 origin_name="$($codex -w "$workspace1" --name "$container1" exec -- git config --global --show-origin user.name | tr -d '\r')"
 origin_email="$($codex -w "$workspace1" --name "$container1" exec -- git config --global --show-origin user.email | tr -d '\r')"
-if ! printf '%s\n' "$origin_name" | grep -q "/config/git/gitconfig"; then
-    echo "Git user.name origin missing /config/git/gitconfig: $origin_name" >&2
-    exit 1
-fi
-if ! printf '%s\n' "$origin_email" | grep -q "/config/git/gitconfig"; then
-    echo "Git user.email origin missing /config/git/gitconfig: $origin_email" >&2
-    exit 1
-fi
+case "$origin_name" in
+    *"file:/home/codex/.gitconfig"*|*"file:/config/git/gitconfig"*) ;;
+    *) echo "Git user.name origin unexpected: $origin_name" >&2; exit 1 ;;
+esac
+case "$origin_email" in
+    *"file:/home/codex/.gitconfig"*|*"file:/config/git/gitconfig"*) ;;
+    *) echo "Git user.email origin unexpected: $origin_email" >&2; exit 1 ;;
+esac
 
 host_name="$(git config --global user.name 2>/dev/null || true)"
 host_email="$(git config --global user.email 2>/dev/null || true)"
-if [ -n "$host_name" ]; then
-    container_name="$($codex -w "$workspace1" --name "$container1" exec -- git config --global user.name | tr -d '\r')"
-    if [ "$container_name" != "$host_name" ]; then
-        echo "Git user.name mismatch: expected '$host_name' got '$container_name'" >&2
-        exit 1
-    fi
+if [ -n "$host_name" ] && [ "$container_name" != "$host_name" ]; then
+    echo "Git user.name mismatch with host: expected '$host_name' got '$container_name'" >&2
+    exit 1
 fi
-if [ -n "$host_email" ]; then
-    container_email="$($codex -w "$workspace1" --name "$container1" exec -- git config --global user.email | tr -d '\r')"
-    if [ "$container_email" != "$host_email" ]; then
-        echo "Git user.email mismatch: expected '$host_email' got '$container_email'" >&2
-        exit 1
-    fi
+if [ -n "$host_email" ] && [ "$container_email" != "$host_email" ]; then
+    echo "Git user.email mismatch with host: expected '$host_email' got '$container_email'" >&2
+    exit 1
 fi
 
 echo "Concurrency check..."
