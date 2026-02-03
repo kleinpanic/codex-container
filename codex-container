@@ -27,7 +27,7 @@ MAGENTA=$'\033[0;35m'
 NC=$'\033[0m' # No Color
 
 SCRIPT_DIR=""
-DEFAULT_VERSION="1.3.4"
+DEFAULT_VERSION="1.3.5"
 VERSION=""
 
 HOST_PWD="$(pwd -P)"
@@ -68,6 +68,8 @@ ACTION=""
 EXEC_COMMAND_STRING=""
 NODE_FILE=""
 HOST_RELATIVE=""
+
+RUNTIME_DOCKER_ARGS=()
 
 AGENT_DOCKER="false"
 AGENT_IMAGE_NAME=""
@@ -704,11 +706,20 @@ ensure_agent_image() {
 create_config_dirs() {
     mkdir -p "$CONFIG_DIR" || true
     mkdir -p "$CONFIG_DIR/npm" "$CONFIG_DIR/codex" "$CONFIG_DIR/history" "$CONFIG_DIR/pipx" "$CONFIG_DIR/pip-cache" "$CONFIG_DIR/git" || true
+    chmod -R a+rwX \
+        "$CONFIG_DIR" \
+        "$CONFIG_DIR/npm" \
+        "$CONFIG_DIR/codex" \
+        "$CONFIG_DIR/history" \
+        "$CONFIG_DIR/pipx" \
+        "$CONFIG_DIR/pip-cache" \
+        "$CONFIG_DIR/git" 2>/dev/null || true
 }
 
 runtime_docker_args() {
     local -a args=()
     args+=( --init )
+    args+=( --user 0:0 )
     args+=( --name "$CONTAINER_NAME" )
     args+=( --label "com.codex.workspace=$WORKSPACE_DIR" )
     args+=( --label "com.codex.allow_sudo=$ALLOW_SUDO" )
@@ -748,7 +759,7 @@ runtime_docker_args() {
             warn "Unable to detect docker.sock group; access may fail."
         fi
     fi
-    echo "${args[@]}"
+    RUNTIME_DOCKER_ARGS=( "${args[@]}" )
 }
 
 start_container() {
@@ -756,7 +767,8 @@ start_container() {
     if [ "$DRY_RUN" = "true" ]; then
         create_config_dirs
         local -a args
-        read -r -a args <<< "$(runtime_docker_args)"
+        runtime_docker_args
+        args=( "${RUNTIME_DOCKER_ARGS[@]}" )
         if [ "$ALLOW_SUDO" != "true" ]; then
             args+=( --security-opt=no-new-privileges )
         fi
@@ -811,7 +823,8 @@ start_container() {
     fi
 
     local -a args
-    read -r -a args <<< "$(runtime_docker_args)"
+    runtime_docker_args
+    args=( "${RUNTIME_DOCKER_ARGS[@]}" )
 
     if [ "$ALLOW_SUDO" != "true" ]; then
         args+=( --security-opt=no-new-privileges )
@@ -922,6 +935,7 @@ exec_in_container() {
     if [ -n "$workdir" ]; then
         exec_args+=( -w "$workdir" )
     fi
+    exec_args+=( --user codex )
 
     if [ "$DEBUG_MODE" = "true" ]; then
         echo -e "${MAGENTA}DEBUG: docker exec invocation:${NC}"
@@ -1108,7 +1122,7 @@ run_ephemeral_container() {
         fi
     fi
 
-    local -a run=( docker run --rm --init )
+    local -a run=( docker run --rm --init --user 0:0 )
     local -a interactive_args=()
     if [ -n "$interactive" ]; then
         interactive_args=( "$interactive" )

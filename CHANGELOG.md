@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.5 - 2026-02-03
+
+Summary:
+- Hardened smoke tests to capture Docker errors and avoid false failures when containers already exist.
+- Ensured config directories are writable for container startup when host UID/GID differ (fixes CI container exits).
+
 ## 1.3.3 - 2026-02-03
 
 Summary:
