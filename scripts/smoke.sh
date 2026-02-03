@@ -9,9 +9,61 @@ workspace2="$(mktemp -d /tmp/codex-ws2.XXXXXX)"
 container1="cc-smoke-1"
 container2="cc-smoke-2"
 container3="cc-smoke-docker"
+smoke_git_name="Codex Container Smoke"
+smoke_git_email="smoke@example.invalid"
+
+export CODEX_GIT_NAME="$smoke_git_name"
+export CODEX_GIT_EMAIL="$smoke_git_email"
 
 strip_ansi() {
     sed -E 's/\x1B\[[0-9;]*[mK]//g'
+}
+
+wait_for_container_running() {
+    local name="$1"
+    local timeout="${2:-10}"
+    local elapsed=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)" = "true" ]; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
+dump_container_state() {
+    local name="$1"
+    if ! docker container inspect "$name" >/dev/null 2>&1; then
+        echo "Container $name not found"
+        return
+    fi
+    echo "Container $name state:"
+    docker inspect --format='  Status={{.State.Status}} Running={{.State.Running}} ExitCode={{.State.ExitCode}} Error={{.State.Error}} OOMKilled={{.State.OOMKilled}}' "$name" || true
+    docker inspect --format='  StartedAt={{.State.StartedAt}} FinishedAt={{.State.FinishedAt}}' "$name" || true
+    docker inspect --format='  Entrypoint={{.Config.Entrypoint}}' "$name" || true
+    docker inspect --format='  Cmd={{.Config.Cmd}}' "$name" || true
+}
+
+dump_smoke_diagnostics() {
+    echo "Smoke diagnostics:"
+    docker ps -a || true
+    dump_container_state "$container1"
+    dump_container_state "$container2"
+    dump_container_state "$container3"
+    if docker container inspect "$container1" >/dev/null 2>&1; then
+        echo "Logs for $container1:"
+        docker logs "$container1" || true
+    fi
+    if docker container inspect "$container2" >/dev/null 2>&1; then
+        echo "Logs for $container2:"
+        docker logs "$container2" || true
+    fi
+    if docker container inspect "$container3" >/dev/null 2>&1; then
+        echo "Logs for $container3:"
+        docker logs "$container3" || true
+    fi
 }
 
 cleanup() {
@@ -47,10 +99,9 @@ if [ "$container1" = "$container2" ]; then
     exit 1
 fi
 
-running1="$(docker inspect -f '{{.State.Running}}' "$container1" 2>/dev/null || true)"
-running2="$(docker inspect -f '{{.State.Running}}' "$container2" 2>/dev/null || true)"
-if [ "$running1" != "true" ] || [ "$running2" != "true" ]; then
+if ! wait_for_container_running "$container1" 10 || ! wait_for_container_running "$container2" 10; then
     echo "Expected both containers to be running" >&2
+    dump_smoke_diagnostics
     exit 1
 fi
 
@@ -121,12 +172,14 @@ esac
 
 host_name="$(git config --global user.name 2>/dev/null || true)"
 host_email="$(git config --global user.email 2>/dev/null || true)"
-if [ -n "$host_name" ] && [ "$container_name" != "$host_name" ]; then
-    echo "Git user.name mismatch with host: expected '$host_name' got '$container_name'" >&2
+expected_name="${CODEX_GIT_NAME:-$host_name}"
+expected_email="${CODEX_GIT_EMAIL:-$host_email}"
+if [ -n "$expected_name" ] && [ "$container_name" != "$expected_name" ]; then
+    echo "Git user.name mismatch: expected '$expected_name' got '$container_name'" >&2
     exit 1
 fi
-if [ -n "$host_email" ] && [ "$container_email" != "$host_email" ]; then
-    echo "Git user.email mismatch with host: expected '$host_email' got '$container_email'" >&2
+if [ -n "$expected_email" ] && [ "$container_email" != "$expected_email" ]; then
+    echo "Git user.email mismatch: expected '$expected_email' got '$container_email'" >&2
     exit 1
 fi
 

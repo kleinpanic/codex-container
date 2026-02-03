@@ -752,6 +752,7 @@ runtime_docker_args() {
 }
 
 start_container() {
+    local -a keepalive_cmd=( sh -lc 'while :; do sleep 3600; done' )
     if [ "$DRY_RUN" = "true" ]; then
         create_config_dirs
         local -a args
@@ -762,7 +763,7 @@ start_container() {
         if [ "$ALLOW_DOCKER" = "true" ]; then
             warn "Enabling docker socket gives this container control of the host Docker daemon."
         fi
-        print_dry_run docker run -d "${args[@]}" "$IMAGE_NAME" sleep infinity
+        print_dry_run docker run -d "${args[@]}" "$IMAGE_NAME" "${keepalive_cmd[@]}"
         return
     fi
 
@@ -818,12 +819,12 @@ start_container() {
 
     if [ "$DEBUG_MODE" = "true" ]; then
         echo -e "${MAGENTA}DEBUG: docker run invocation:${NC}"
-        printf '%q ' docker run -d "${args[@]}" "$IMAGE_NAME" sleep infinity
+        printf '%q ' docker run -d "${args[@]}" "$IMAGE_NAME" "${keepalive_cmd[@]}"
         echo
         echo
     fi
 
-    docker run -d "${args[@]}" "$IMAGE_NAME" sleep infinity >/dev/null
+    docker run -d "${args[@]}" "$IMAGE_NAME" "${keepalive_cmd[@]}" >/dev/null
     set_last_container "$CONTAINER_NAME"
     echo -e "${GREEN}Runtime container ready: ${CONTAINER_NAME}${NC}"
 }
