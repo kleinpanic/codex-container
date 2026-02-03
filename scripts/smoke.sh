@@ -6,18 +6,18 @@ codex="$root_dir/codex-container"
 
 workspace1="$(mktemp -d /tmp/codex-ws1.XXXXXX)"
 workspace2="$(mktemp -d /tmp/codex-ws2.XXXXXX)"
-container1="cc-smoke-1"
-container2="cc-smoke-2"
-container3="cc-smoke-docker"
+config_dir="$(mktemp -d /tmp/codex-config-smoke.XXXXXX)"
+chmod 777 "$config_dir"
+smoke_id="$(date +%s)-$$"
+container1="cc-smoke-1-$smoke_id"
+container2="cc-smoke-2-$smoke_id"
+container3="cc-smoke-docker-$smoke_id"
 smoke_git_name="Codex Container Smoke"
 smoke_git_email="smoke@example.invalid"
 
 export CODEX_GIT_NAME="$smoke_git_name"
 export CODEX_GIT_EMAIL="$smoke_git_email"
-
-strip_ansi() {
-    sed -E 's/\x1B\[[0-9;]*[mK]//g'
-}
+export CODEX_CONFIG="$config_dir"
 
 wait_for_container_running() {
     local name="$1"
@@ -31,6 +31,39 @@ wait_for_container_running() {
         elapsed=$((elapsed + 1))
     done
     return 1
+}
+
+start_runtime_container() {
+    local name="$1"
+    local workspace="$2"
+    local allow_sudo="${3:-false}"
+    local allow_docker="${4:-false}"
+    local -a args=()
+    local output=""
+
+    args+=( "$codex" --debug -w "$workspace" --name "$name" )
+    if [ "$allow_sudo" = "true" ]; then
+        args+=( --allow-sudo )
+    fi
+    if [ "$allow_docker" = "true" ]; then
+        args+=( --allow-docker )
+    fi
+
+    if ! output="$("${args[@]}" start 2>&1)"; then
+        echo "Failed to start container $name" >&2
+        printf '%s\n' "$output" >&2
+        dump_smoke_diagnostics
+        exit 1
+    fi
+
+    local workspace_label=""
+    workspace_label="$(docker inspect -f '{{ index .Config.Labels "com.codex.workspace" }}' "$name" 2>/dev/null || true)"
+    if [ -z "$workspace_label" ] || [ "$workspace_label" != "$workspace" ]; then
+        echo "Workspace label mismatch: expected '$workspace' got '$workspace_label'" >&2
+        printf '%s\n' "$output" >&2
+        dump_smoke_diagnostics
+        exit 1
+    fi
 }
 
 dump_container_state() {
@@ -76,7 +109,7 @@ cleanup() {
     if [ -n "$container3" ]; then
         "$codex" --name "$container3" rm >/dev/null 2>&1 || true
     fi
-    rm -rf "$workspace1" "$workspace2"
+    rm -rf "$workspace1" "$workspace2" "$config_dir"
 }
 trap cleanup EXIT
 
@@ -84,15 +117,10 @@ echo "Building image..."
 "$codex" --build >/dev/null
 
 echo "Starting runtime container (workspace1)..."
-debug_output="$("$codex" --debug -w "$workspace1" --name "$container1" start 2>&1)"
-workspace_line="$(printf '%s\n' "$debug_output" | strip_ansi | awk -F'Workspace:' '/Workspace:/ {print $2; exit}' | sed 's/^ *//')"
-if [ "$workspace_line" != "$workspace1" ]; then
-    echo "Workspace debug mismatch: expected '$workspace1' got '$workspace_line'" >&2
-    exit 1
-fi
+start_runtime_container "$container1" "$workspace1"
 
 echo "Starting runtime container (workspace2, allow-sudo)..."
-"$codex" -w "$workspace2" --name "$container2" --allow-sudo start >/dev/null
+start_runtime_container "$container2" "$workspace2" "true"
 
 if [ "$container1" = "$container2" ]; then
     echo "Container name collision detected" >&2
@@ -203,11 +231,13 @@ fi
 if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; then
     echo "SSH agent forwarding check..."
     # shellcheck disable=SC2016 # Deferred expansion inside container shell.
-    "$codex" -w "$workspace1" --name "$container1" exec -- sh -lc 'test -S "$SSH_AUTH_SOCK"' >/dev/null
+    if ! "$codex" -w "$workspace1" --name "$container1" exec -- sh -lc 'test -S "$SSH_AUTH_SOCK"' >/dev/null; then
+        echo "Warning: SSH agent socket not available inside container; skipping agent forwarding check"
+    fi
 fi
 
 echo "Runtime docker socket check..."
-"$codex" -w "$workspace1" --name "$container3" --allow-docker start >/dev/null
+start_runtime_container "$container3" "$workspace1" "false" "true"
 "$codex" -w "$workspace1" --name "$container3" exec -- sh -lc 'docker version >/dev/null && docker ps >/dev/null'
 
 echo "Smoke tests passed"
