@@ -151,6 +151,8 @@ command -v codex-container
 ./codex-container --env-file /path/to/.env --search
 ```
 
+Note: `--full-auto` is passed through to the Codex CLI, but approvals can still be required depending on your Codex settings and policy configuration. Use `--debug` to see the resolved codex invocation.
+
 ### Shell / tools
 
 ```bash
@@ -297,7 +299,7 @@ If you don’t use this option, Codex state is persisted in `/config/codex` inst
 
 ## SSH Agent Forwarding
 
-If `SSH_AUTH_SOCK` is set on the host, the wrapper forwards it into the container at `/ssh-agent` and sets `SSH_AUTH_SOCK` accordingly. If not set, the wrapper logs a warning but continues.
+If `SSH_AUTH_SOCK` is set on the host, the wrapper forwards it into the container at the same absolute path and sets `SSH_AUTH_SOCK` accordingly. If not set, the wrapper logs a warning but continues.
 
 Recommended workflow:
 
@@ -310,6 +312,8 @@ If the agent was not available when the container was created, recreate it:
 ```bash
 ./codex-container --recreate start
 ```
+
+For nested Docker usage, the wrapper exports `CODEX_HOST_SSH_AUTH_SOCK` so that containers created from inside other containers can still bind the host agent socket.
 
 Optional persistence:
 
@@ -382,6 +386,7 @@ These are wrapper controls and passthrough helpers:
 - `CODEX_HOST_PWD` — your host working directory
 - `CODEX_HOST_WORKSPACE` — resolved host workspace root
 - `CODEX_HOST_RELATIVE` — host subdirectory relative to workspace (used to set container workdir)
+- `CODEX_HOST_SSH_AUTH_SOCK` — host SSH agent socket path (for nested Docker usage)
 
 ---
 

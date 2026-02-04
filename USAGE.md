@@ -116,6 +116,8 @@ If the agent was not available when the container was created, recreate it after
 ./codex-container --recreate start
 ```
 
+When Docker is used from inside another container, the wrapper exports `CODEX_HOST_SSH_AUTH_SOCK` so nested runs can still bind the host agent socket.
+
 Optional persistence:
 
 ```bash
@@ -135,6 +137,8 @@ Codex invocation patterns:
 # Explicit flag
 ./codex-container --codex --search
 ```
+
+`--full-auto` is forwarded to the Codex CLI, but approvals may still appear depending on your Codex configuration. Use `--debug` to see the resolved codex invocation.
 
 Agent mode (Docker socket passthrough):
 

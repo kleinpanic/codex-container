@@ -1,12 +1,5 @@
 # Changelog
 
-## 1.3.7 - 2026-02-04
-
-Summary:
-- Fixed lifecycle container resolution to favor the current workspace and require explicit disambiguation.
-- Added explicit `--last`, `--recreate`, and `--auto-cleanup` controls for safer container management.
-- Improved SSH forwarding diagnostics and guidance and extended smoke coverage for lifecycle regressions.
-
 ## 1.3.6 - 2026-02-04
 
 Summary:
