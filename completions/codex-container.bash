@@ -5,11 +5,11 @@ _codex_container() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local opts="-w --workspace -c --config -n --name -e --env --env-file --agent-docker --agent-image --agent-shell --agent-workspace --agent-config --agent-ssh-auth-sock --agent-env --agent-env-file --agent-root --host-codex-dir --allow-sudo --allow-docker --persist-ssh --seed-known-hosts --ephemeral --session --auto-cleanup --recreate --last --debug --dry-run --yes -h --help --version"
-    local subs="start stop rm status doctor shell exec logs agent clean prune-images"
+    local opts="-w --workspace -c --config -n --name -e --env --env-file --agent-docker --agent-image --agent-shell --agent-workspace --agent-config --agent-ssh-auth-sock --agent-env --agent-env-file --agent-root --host-codex-dir --allow-sudo --allow-docker --persist-ssh --seed-known-hosts --ephemeral --session --auto-cleanup --label --recreate --last --debug --dry-run --yes --all --include-self -h --help --version"
+    local subs="start stop rm status doctor shell exec logs agent ps clean prune-images"
 
     case "$prev" in
-        -w|--workspace|-c|--config|-n|--name|--env-file|--agent-image|--agent-workspace|--agent-config|--agent-env-file|--seed-known-hosts)
+        -w|--workspace|-c|--config|-n|--name|--env-file|--agent-image|--agent-workspace|--agent-config|--agent-env-file|--seed-known-hosts|--label)
             return
             ;;
         -e|--env|--agent-env)

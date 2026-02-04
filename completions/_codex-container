@@ -23,12 +23,15 @@ _arguments -s \
   '--ephemeral[Run an ephemeral container]' \
   '--session[Alias for --ephemeral]' \
   '--auto-cleanup[Stop and remove container after session exits]' \
+  '--label[Add a custom Docker label key=value]:label:' \
   '--recreate[Recreate container if it already exists]' \
   '--last[Target last-used container]' \
   '--debug[Print docker invocation]' \
   '--dry-run[Print docker commands without running them]' \
   '--yes[Auto-confirm prompts]' \
+  '--all[Clean all managed containers (requires --yes)]' \
+  '--include-self[Include the current container in clean targets]' \
   '(-h --help)'{-h,--help}'[Show help]' \
   '--version[Show version]' \
-  '1:subcommand:(start stop rm status doctor shell exec logs agent clean prune-images)' \
+  '1:subcommand:(start stop rm status doctor shell exec logs agent ps clean prune-images)' \
   '*::args:->args'
