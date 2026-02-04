@@ -27,7 +27,7 @@ MAGENTA=$'\033[0;35m'
 NC=$'\033[0m' # No Color
 
 SCRIPT_DIR=""
-DEFAULT_VERSION="1.3.7"
+DEFAULT_VERSION="1.3.8"
 VERSION=""
 
 HOST_PWD="$(pwd -P)"
@@ -42,12 +42,12 @@ CONTAINER_NAME=""
 CONTAINER_ID=""
 WORKSPACE_HASH=""
 MANAGED_LABEL_PREFIX="io.codex-container"
-MANAGED_LABEL_MANAGED="io.codex-container.managed"
-MANAGED_LABEL_WORKSPACE="io.codex-container.workspace"
-MANAGED_LABEL_WORKSPACE_HASH="io.codex-container.workspace_hash"
-MANAGED_LABEL_CONFIG_DIR="io.codex-container.config_dir"
-MANAGED_LABEL_ALLOW_SUDO="io.codex-container.allow_sudo"
-MANAGED_LABEL_ALLOW_DOCKER="io.codex-container.allow_docker"
+MANAGED_LABEL_MANAGED="${MANAGED_LABEL_PREFIX}.managed"
+MANAGED_LABEL_WORKSPACE="${MANAGED_LABEL_PREFIX}.workspace"
+MANAGED_LABEL_WORKSPACE_HASH="${MANAGED_LABEL_PREFIX}.workspace_hash"
+MANAGED_LABEL_CONFIG_DIR="${MANAGED_LABEL_PREFIX}.config_dir"
+MANAGED_LABEL_ALLOW_SUDO="${MANAGED_LABEL_PREFIX}.allow_sudo"
+MANAGED_LABEL_ALLOW_DOCKER="${MANAGED_LABEL_PREFIX}.allow_docker"
 WORKSPACE_EXPLICIT="false"
 USE_LAST_CONTAINER="false"
 CONTAINER_NAME_EXPLICIT="false"
@@ -1279,7 +1279,7 @@ doctor() {
         echo "  Guidance: Container SSH_AUTH_SOCK is not a socket. Recreate the container and ensure the host agent is running: $0 --recreate start"
     else
         case "$agent_list" in
-            *"no identities"*|*"The agent has no identities"*)
+            *"no identities"*)
                 echo "  Guidance: SSH agent is forwarded but has no identities. Run ssh-add on the host and retry."
                 ;;
         esac
