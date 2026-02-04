@@ -15,6 +15,8 @@ NC='\033[0m' # No Color
 : "${ALLOW_SUDO:=}"
 : "${CODEX_GIT_NAME:=}"
 : "${CODEX_GIT_EMAIL:=}"
+: "${CODEX_SSH_PERSIST:=}"
+: "${CODEX_SSH_SEED_HOSTS:=}"
 
 is_mountpoint() {
     local path="$1"
@@ -201,6 +203,64 @@ init_config() {
     fi
 }
 
+setup_ssh_persistence() {
+    if [ "$CODEX_SSH_PERSIST" != "true" ]; then
+        return
+    fi
+
+    mkdir -p /config/ssh 2>/dev/null || true
+    chmod 700 /config/ssh 2>/dev/null || true
+
+    if is_mountpoint /home/codex/.ssh; then
+        echo -e "${YELLOW}SSH persistence requested but /home/codex/.ssh is a mount. Skipping symlink.${NC}"
+    else
+        if [ ! -L /home/codex/.ssh ]; then
+            rm -rf /home/codex/.ssh 2>/dev/null || true
+            ln -s /config/ssh /home/codex/.ssh
+        fi
+    fi
+
+    if is_root; then
+        if [ -n "$USER_UID" ] && [ -n "$USER_GID" ]; then
+            chown -R "$USER_UID:$USER_GID" /config/ssh 2>/dev/null || true
+        else
+            chown -R codex:codex /config/ssh 2>/dev/null || true
+        fi
+    fi
+
+    if [ -z "$CODEX_SSH_SEED_HOSTS" ]; then
+        return
+    fi
+
+    if ! command -v ssh-keyscan >/dev/null 2>&1; then
+        echo -e "${YELLOW}ssh-keyscan not available; skipping known_hosts seeding.${NC}"
+        return
+    fi
+
+    local known_hosts="/config/ssh/known_hosts"
+    touch "$known_hosts" 2>/dev/null || true
+    chmod 600 "$known_hosts" 2>/dev/null || true
+
+    local host
+    IFS=',' read -r -a hosts <<< "$CODEX_SSH_SEED_HOSTS"
+    for host in "${hosts[@]}"; do
+        host="$(echo "$host" | xargs)"
+        if [ -z "$host" ]; then
+            continue
+        fi
+        if command -v ssh-keygen >/dev/null 2>&1; then
+            if ssh-keygen -F "$host" -f "$known_hosts" >/dev/null 2>&1; then
+                continue
+            fi
+        else
+            if grep -q "$host" "$known_hosts" 2>/dev/null; then
+                continue
+            fi
+        fi
+        ssh-keyscan -H "$host" >> "$known_hosts" 2>/dev/null || true
+    done
+}
+
 # Function to display welcome message
 show_welcome() {
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -234,6 +294,7 @@ show_welcome() {
 main() {
     setup_user
     init_config
+    setup_ssh_persistence
 
     # Respect Docker --workdir; only fall back if we start in /
     if [ "${PWD:-/}" = "/" ] && [ -d /workspace ]; then
