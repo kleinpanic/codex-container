@@ -152,6 +152,50 @@ Agent mode (Docker socket passthrough):
 
 If your host Docker socket requires elevated permissions, add `--agent-root`.
 
+## Multiple Containers Per Workspace
+
+You can run multiple managed containers for the same workspace by assigning unique names:
+
+```bash
+./codex-container --name my-runtime-a start
+./codex-container --name my-runtime-b start
+```
+
+List managed containers for the current workspace:
+
+```bash
+./codex-container ps
+```
+
+List managed containers across all workspaces:
+
+```bash
+./codex-container ps --all
+```
+
+Target a specific container for lifecycle commands:
+
+```bash
+./codex-container --name my-runtime-a status
+./codex-container --name my-runtime-b logs
+```
+
+Clean all managed containers for the current workspace:
+
+```bash
+./codex-container clean --yes
+```
+
+Clean all managed containers from the host:
+
+```bash
+./codex-container clean --all --yes
+```
+
+When running inside a managed container, `clean --all` requires either a `--label key=value` scope or `--force`.
+
+The smoke test includes an expected name-collision check to verify safety behavior.
+
 ## Git Identity Propagation
 
 Codex Container discovers your git identity from these sources (first match wins):

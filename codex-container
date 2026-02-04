@@ -27,7 +27,7 @@ MAGENTA=$'\033[0;35m'
 NC=$'\033[0m' # No Color
 
 SCRIPT_DIR=""
-DEFAULT_VERSION="1.3.8"
+DEFAULT_VERSION="1.3.11"
 VERSION=""
 
 HOST_PWD="$(pwd -P)"
@@ -59,6 +59,8 @@ HOST_CODEX_DIR="false"
 ALLOW_SUDO="false"
 EPHEMERAL="false"
 ALLOW_DOCKER="false"
+ALLOW_SUDO_EXPLICIT="false"
+ALLOW_DOCKER_EXPLICIT="false"
 DRY_RUN="false"
 PRUNE_YES="false"
 PERSIST_SSH="false"
@@ -66,6 +68,10 @@ SEED_KNOWN_HOSTS=()
 RECREATE_CONTAINER="false"
 AUTO_CLEANUP="false"
 CONTAINER_CREATED="false"
+CLEAN_ALL="false"
+INCLUDE_SELF="false"
+FORCE_ALL="false"
+EXTRA_LABELS=()
 
 # Command payloads (argv-safe)
 ENV_ARRAY=()
@@ -112,7 +118,7 @@ info() {
 }
 
 warn() {
-    echo -e "${YELLOW}Warning:${NC} $*"
+    echo -e "${YELLOW}Warning:${NC} $*" >&2
 }
 
 print_dry_run() {
@@ -259,7 +265,7 @@ format_container_ref() {
 
 is_management_action() {
     case "$ACTION" in
-        status|doctor|stop|rm|logs|clean)
+        status|doctor|stop|rm|logs|clean|ps)
             return 0
             ;;
         *)
@@ -282,12 +288,73 @@ find_managed_containers() {
     docker ps -a "${filters[@]}" --format '{{.ID}} {{.Names}}'
 }
 
+list_managed_containers_raw() {
+    local scope="${1:-workspace}"
+    local -a filters=()
+    filters+=( --filter "label=${MANAGED_LABEL_MANAGED}=true" )
+    if [ "$scope" = "workspace" ]; then
+        if [ -z "$WORKSPACE_HASH" ]; then
+            return 1
+        fi
+        filters+=( --filter "label=${MANAGED_LABEL_WORKSPACE_HASH}=${WORKSPACE_HASH}" )
+    fi
+    if [ "${#EXTRA_LABELS[@]}" -gt 0 ]; then
+        local label
+        for label in "${EXTRA_LABELS[@]}"; do
+            filters+=( --filter "label=$label" )
+        done
+    fi
+    docker ps -a "${filters[@]}" --format '{{.ID}} {{.Names}} {{.Status}}'
+}
+
+list_managed_containers() {
+    local scope="${1:-workspace}"
+    local matches=""
+    matches="$(list_managed_containers_raw "$scope" 2>/dev/null || true)"
+    if [ -z "$matches" ]; then
+        echo "No managed containers found."
+        return 0
+    fi
+
+    printf '%s\t%s\t%s\n' "ID" "NAME" "STATUS"
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        local id
+        local rest
+        local name
+        local status
+        id="${line%% *}"
+        rest="${line#* }"
+        name="${rest%% *}"
+        status="${rest#* }"
+        printf '%s\t%s\t%s\n' "$id" "$name" "$status"
+    done <<< "$matches"
+}
+
+confirm_or_fail() {
+    local prompt="$1"
+    if [ "$PRUNE_YES" = "true" ]; then
+        return 0
+    fi
+    if [ -t 0 ]; then
+        printf '%s [y/N] ' "$prompt"
+        read -r reply
+        case "$reply" in
+            y|Y|yes|YES) return 0 ;;
+            *) echo "Aborted."; return 1 ;;
+        esac
+    fi
+    fail "Confirmation required. Re-run with --yes."
+}
+
 fail_multiple_managed_containers() {
     local matches="$1"
     echo -e "${RED}Error:${NC} Multiple managed containers match this workspace."
     echo "Candidates:"
     printf '  %s\n' "$matches"
-    echo "Disambiguate with --name <container> or remove extra containers."
+    echo "Run: ./codex-container ps to list candidates"
+    echo "Use: --name <container> to target one"
+    echo "Or remove all for this workspace: ./codex-container clean --yes"
     exit 1
 }
 
@@ -395,6 +462,117 @@ get_container_label() {
     local container="$1"
     local key="$2"
     docker inspect -f "{{ index .Config.Labels \"$key\" }}" "$container" 2>/dev/null || true
+}
+
+container_matches_label_filters() {
+    local container="$1"
+    if [ "${#EXTRA_LABELS[@]}" -eq 0 ]; then
+        return 0
+    fi
+    local label
+    for label in "${EXTRA_LABELS[@]}"; do
+        local key="${label%%=*}"
+        if [ "$label" = "$key" ]; then
+            if [ -z "$(get_container_label "$container" "$key")" ]; then
+                return 1
+            fi
+        else
+            local expected="${label#*=}"
+            if [ "$(get_container_label "$container" "$key")" != "$expected" ]; then
+                return 1
+            fi
+        fi
+    done
+    return 0
+}
+
+detect_self_container_id() {
+    local candidate=""
+    local id=""
+    local line=""
+
+    if [ -n "${HOSTNAME:-}" ] && printf '%s' "$HOSTNAME" | grep -qE '^[0-9a-f]{12,64}$'; then
+        id="$(docker inspect -f '{{.Id}}' "$HOSTNAME" 2>/dev/null || true)"
+        if [ -n "$id" ]; then
+            echo "$id"
+            return
+        fi
+    fi
+
+    if [ -r /etc/hostname ]; then
+        line="$(cat /etc/hostname 2>/dev/null || true)"
+        if printf '%s' "$line" | grep -qE '^[0-9a-f]{12,64}$'; then
+            id="$(docker inspect -f '{{.Id}}' "$line" 2>/dev/null || true)"
+            if [ -n "$id" ]; then
+                echo "$id"
+                return
+            fi
+        fi
+    fi
+
+    if [ -r /proc/self/mountinfo ]; then
+        candidate="$(grep -oE '/containers/[0-9a-f]{64}' /proc/self/mountinfo | head -n 1 | awk -F/ '{print $3}')"
+        if [ -n "$candidate" ]; then
+            id="$(docker inspect -f '{{.Id}}' "$candidate" 2>/dev/null || true)"
+            if [ -n "$id" ]; then
+                echo "$id"
+                return
+            fi
+        fi
+    fi
+
+    if [ -r /proc/self/cgroup ]; then
+        candidate="$(grep -oE '[0-9a-f]{64}' /proc/self/cgroup | head -n 1)"
+        if [ -n "$candidate" ]; then
+            id="$(docker inspect -f '{{.Id}}' "$candidate" 2>/dev/null || true)"
+            if [ -n "$id" ]; then
+                echo "$id"
+                return
+            fi
+        fi
+    fi
+}
+
+detect_self_managed_container_id() {
+    local self_id
+    self_id="$(detect_self_container_id || true)"
+    if [ -z "$self_id" ]; then
+        return 1
+    fi
+    if [ "$(get_container_label "$self_id" "$MANAGED_LABEL_MANAGED")" = "true" ]; then
+        echo "$self_id"
+        return 0
+    fi
+    return 1
+}
+
+suggest_container_name() {
+    local base="$1"
+    local hash_short=""
+    if [ -n "$WORKSPACE_HASH" ]; then
+        hash_short="${WORKSPACE_HASH:0:8}"
+    fi
+    if [ -z "$hash_short" ] && [ -n "$WORKSPACE_DIR" ]; then
+        hash_short="$(hash_path "$WORKSPACE_DIR")"
+        hash_short="${hash_short:0:8}"
+    fi
+    if [ -z "$hash_short" ]; then
+        hash_short="alt"
+    fi
+    local candidate="${base}-${hash_short}"
+    local counter=2
+    while container_exists "$candidate"; do
+        candidate="${base}-${hash_short}-${counter}"
+        counter=$((counter + 1))
+    done
+    echo "$candidate"
+}
+
+docker_available() {
+    if [ "$DRY_RUN" = "true" ]; then
+        return 1
+    fi
+    docker info >/dev/null 2>&1
 }
 
 ensure_docker() {
@@ -737,11 +915,15 @@ ${YELLOW}OPTIONS:${NC}
     ${CYAN}--ephemeral${NC}                 Run a one-shot container (legacy --rm behavior)
     ${CYAN}--session${NC}                   Alias for --ephemeral
     ${CYAN}--auto-cleanup${NC}              Stop and remove container after the session exits (if created now)
+    ${CYAN}--label <key=value>${NC}        Add a custom Docker label to the runtime container (repeatable; filters clean)
     ${CYAN}--recreate${NC}                  Recreate the target container if it already exists
     ${CYAN}--last${NC}                      Target the last-used container (management commands)
     ${CYAN}--debug${NC}                     Print resolved docker invocation (no secrets redacted)
     ${CYAN}--dry-run${NC}                   Print docker commands without running them
-    ${CYAN}--yes${NC}                       Auto-confirm prompts (for prune-images)
+    ${CYAN}--yes${NC}                       Auto-confirm prompts (for clean/prune-images)
+    ${CYAN}--all${NC}                       (clean/ps only) Scope to all managed containers
+    ${CYAN}--force${NC}                     (clean only) Allow clean --all inside managed containers
+    ${CYAN}--include-self${NC}              (clean only) Include the current container in clean targets
     ${CYAN}-h, --help${NC}                  Show this help message
     ${CYAN}--version${NC}                   Show version information
 
@@ -749,7 +931,8 @@ ${YELLOW}SUBCOMMANDS:${NC}
     ${CYAN}start${NC}                       Create or ensure the runtime container exists
     ${CYAN}stop${NC}                        Stop the runtime container
     ${CYAN}rm${NC}                          Remove the runtime container
-    ${CYAN}clean${NC}                       Remove runtime container and image
+    ${CYAN}ps${NC}                          List managed containers for this workspace
+    ${CYAN}clean${NC}                       Remove managed containers for this workspace
     ${CYAN}status${NC}                      Check container status
     ${CYAN}doctor${NC}                      Debug container/SSH agent status
     ${CYAN}shell${NC}                       Open interactive shell in runtime container
@@ -787,6 +970,15 @@ ${YELLOW}EXAMPLES:${NC}
 
     ${BLUE}# Prune older codex-container images${NC}
     codex-container prune-images --yes
+
+    ${BLUE}# List managed containers for this workspace${NC}
+    codex-container ps
+
+    ${BLUE}# Remove managed containers for this workspace${NC}
+    codex-container clean
+
+    ${BLUE}# Remove all managed containers (requires --yes)${NC}
+    codex-container clean --all --yes
 
 ${YELLOW}ENVIRONMENT VARIABLES:${NC}
     ${CYAN}CODEX_WORKSPACE${NC}        Override default workspace directory
@@ -915,6 +1107,9 @@ runtime_docker_args() {
     args+=( --label "com.codex.workspace=$WORKSPACE_DIR" )
     args+=( --label "com.codex.allow_sudo=$ALLOW_SUDO" )
     args+=( --label "com.codex.allow_docker=$ALLOW_DOCKER" )
+    for extra_label in "${EXTRA_LABELS[@]}"; do
+        args+=( --label "$extra_label" )
+    done
     args+=( --network host )
     args+=( -v "$WORKSPACE_DIR:/workspace" )
     args+=( -v "$CONFIG_DIR:/config" )
@@ -1001,42 +1196,88 @@ start_container() {
             remove_container
             CONTAINER_ID=""
         else
-        local existing_allow
-        existing_allow="$(get_container_label "$target_ref" "$MANAGED_LABEL_ALLOW_SUDO")"
-        if [ -z "$existing_allow" ]; then
-            existing_allow="$(get_container_label "$target_ref" "com.codex.allow_sudo")"
-        fi
-        local existing_docker
-        existing_docker="$(get_container_label "$target_ref" "$MANAGED_LABEL_ALLOW_DOCKER")"
-        if [ -z "$existing_docker" ]; then
-            existing_docker="$(get_container_label "$target_ref" "com.codex.allow_docker")"
-        fi
-        if [ "$ALLOW_SUDO" = "true" ] && [ "$existing_allow" = "false" ]; then
-            local rm_cmd="$0 --name $CONTAINER_NAME rm"
-            fail "Container exists without --allow-sudo: $conflict. Remove it with: ${rm_cmd}, or re-run with --recreate: $0 --allow-sudo --recreate start"
-        fi
-        if [ "$ALLOW_SUDO" != "true" ] && [ "$existing_allow" = "true" ]; then
-            warn "Container was created with --allow-sudo enabled."
-        fi
-        if [ -z "$existing_allow" ]; then
-            warn "Existing container missing allow-sudo label; proceeding without mismatch enforcement."
-        fi
-        if [ "$ALLOW_DOCKER" = "true" ] && [ "$existing_docker" = "false" ]; then
-            local rm_cmd="$0 --name $CONTAINER_NAME rm"
-            fail "Container exists without --allow-docker: $conflict. Remove it with: ${rm_cmd}, or re-run with --recreate: $0 --allow-docker --recreate start"
-        fi
-        if [ "$ALLOW_DOCKER" != "true" ] && [ "$existing_docker" = "true" ]; then
-            warn "Container was created with --allow-docker enabled."
-        fi
-        if [ -z "$existing_docker" ]; then
-            warn "Existing container missing allow-docker label; proceeding without mismatch enforcement."
-        fi
-        if ! container_running "$target_ref"; then
-            echo -e "${YELLOW}Starting existing container...${NC}"
-            docker start "$target_ref" >/dev/null
-        fi
-        set_last_container "$CONTAINER_NAME"
-        return
+            local managed
+            managed="$(get_container_label "$target_ref" "$MANAGED_LABEL_MANAGED")"
+            if [ "$managed" != "true" ]; then
+                fail "Container name already in use by a non-managed container: $conflict. Choose a different --name or remove it with docker rm -f."
+            fi
+
+            local existing_workspace_hash
+            local existing_workspace
+            local existing_allow
+            local existing_docker
+            local conflict_reason=""
+
+            existing_workspace_hash="$(get_container_label "$target_ref" "$MANAGED_LABEL_WORKSPACE_HASH")"
+            existing_workspace="$(get_container_label "$target_ref" "$MANAGED_LABEL_WORKSPACE")"
+            if [ -z "$existing_workspace" ]; then
+                existing_workspace="$(get_container_label "$target_ref" "com.codex.workspace")"
+            fi
+            if [ -n "$existing_workspace_hash" ]; then
+                if [ "$existing_workspace_hash" != "$WORKSPACE_HASH" ]; then
+                    conflict_reason="workspace mismatch"
+                fi
+            elif [ -n "$existing_workspace" ]; then
+                if [ "$existing_workspace" != "$WORKSPACE_DIR" ]; then
+                    conflict_reason="workspace mismatch"
+                fi
+            else
+                conflict_reason="missing workspace label"
+            fi
+
+            existing_allow="$(get_container_label "$target_ref" "$MANAGED_LABEL_ALLOW_SUDO")"
+            if [ -z "$existing_allow" ]; then
+                existing_allow="$(get_container_label "$target_ref" "com.codex.allow_sudo")"
+            fi
+            if [ -z "$existing_allow" ]; then
+                if [ "$ALLOW_SUDO_EXPLICIT" = "true" ]; then
+                    conflict_reason="${conflict_reason:-missing allow-sudo label}"
+                else
+                    warn "Existing container missing allow-sudo label; reusing it without strict match."
+                fi
+            elif [ "$existing_allow" != "$ALLOW_SUDO" ]; then
+                if [ "$ALLOW_SUDO_EXPLICIT" = "true" ]; then
+                    conflict_reason="${conflict_reason:-allow-sudo mismatch}"
+                else
+                    warn "Existing container has allow-sudo=$existing_allow; reusing it."
+                fi
+            fi
+
+            existing_docker="$(get_container_label "$target_ref" "$MANAGED_LABEL_ALLOW_DOCKER")"
+            if [ -z "$existing_docker" ]; then
+                existing_docker="$(get_container_label "$target_ref" "com.codex.allow_docker")"
+            fi
+            if [ -z "$existing_docker" ]; then
+                if [ "$ALLOW_DOCKER_EXPLICIT" = "true" ]; then
+                    conflict_reason="${conflict_reason:-missing allow-docker label}"
+                else
+                    warn "Existing container missing allow-docker label; reusing it without strict match."
+                fi
+            elif [ "$existing_docker" != "$ALLOW_DOCKER" ]; then
+                if [ "$ALLOW_DOCKER_EXPLICIT" = "true" ]; then
+                    conflict_reason="${conflict_reason:-allow-docker mismatch}"
+                else
+                    warn "Existing container has allow-docker=$existing_docker; reusing it."
+                fi
+            fi
+
+            if [ -z "$conflict_reason" ]; then
+                if [ "$ACTION" = "start" ]; then
+                    echo "Using existing container $CONTAINER_NAME"
+                fi
+                if ! container_running "$target_ref"; then
+                    if [ "$ACTION" = "start" ]; then
+                        echo -e "${YELLOW}Starting existing container...${NC}"
+                    fi
+                    docker start "$target_ref" >/dev/null
+                fi
+                set_last_container "$CONTAINER_NAME"
+                return
+            fi
+
+            local suggested
+            suggested="$(suggest_container_name "$CONTAINER_NAME")"
+            fail "Container name collision (${conflict_reason}): $conflict. Re-run with --recreate to replace it, or choose a new name like: $0 --name $suggested start"
         fi
     fi
 
@@ -1126,12 +1367,117 @@ run_with_auto_cleanup() {
 }
 
 clean_all() {
-    remove_container
-    if image_exists "$IMAGE_NAME"; then
-        echo -e "${YELLOW}Removing image...${NC}"
-        docker rmi "$IMAGE_NAME" 2>/dev/null || true
-        echo -e "${GREEN}Image removed${NC}"
+    local scope="workspace"
+    local matches=""
+    local self_id=""
+    local self_name=""
+    local self_ref=""
+
+    if [ "$CLEAN_ALL" = "true" ]; then
+        scope="all"
     fi
+
+    if [ "$scope" = "all" ] && [ "$FORCE_ALL" != "true" ] && [ "${#EXTRA_LABELS[@]}" -eq 0 ]; then
+        if docker_available; then
+            local managed_self=""
+            managed_self="$(detect_self_managed_container_id || true)"
+            if [ -n "$managed_self" ]; then
+                fail "Refusing to clean all managed containers from inside a managed container because this would remove other managed sessions. Run the clean from the host, provide --label key=value to scope it, or re-run with --force."
+            fi
+        fi
+    fi
+
+    if [ "$scope" = "all" ] && [ "$PRUNE_YES" != "true" ]; then
+        fail "Refusing to clean all managed containers without --yes."
+    fi
+
+    if [ "$CONTAINER_NAME_EXPLICIT" = "true" ]; then
+        if container_exists "$CONTAINER_NAME"; then
+            local managed
+            managed="$(get_container_label "$CONTAINER_NAME" "$MANAGED_LABEL_MANAGED")"
+            if [ "$managed" != "true" ]; then
+                fail "Container is not managed: $CONTAINER_NAME"
+            fi
+            if ! container_matches_label_filters "$CONTAINER_NAME"; then
+                echo "No managed containers found."
+                return 0
+            fi
+            matches="$(docker ps -a --filter "name=^${CONTAINER_NAME}$" --format '{{.ID}} {{.Names}} {{.Status}}')"
+        else
+            fail "Container does not exist: $CONTAINER_NAME"
+        fi
+    else
+        if [ "$scope" = "workspace" ] && [ -z "$WORKSPACE_HASH" ]; then
+            fail "Workspace is required for clean. Use --workspace, set CODEX_WORKSPACE, or pass --all."
+        fi
+        local -a filters=()
+        filters+=( --filter "label=${MANAGED_LABEL_MANAGED}=true" )
+        if [ "$scope" = "workspace" ]; then
+            filters+=( --filter "label=${MANAGED_LABEL_WORKSPACE_HASH}=${WORKSPACE_HASH}" )
+        fi
+        if [ "${#EXTRA_LABELS[@]}" -gt 0 ]; then
+            local label
+            for label in "${EXTRA_LABELS[@]}"; do
+                filters+=( --filter "label=$label" )
+            done
+        fi
+        matches="$(docker ps -a "${filters[@]}" --format '{{.ID}} {{.Names}} {{.Status}}' 2>/dev/null || true)"
+    fi
+
+    if [ "$INCLUDE_SELF" != "true" ]; then
+        self_id="$(detect_self_container_id)"
+        if [ -n "$self_id" ]; then
+            local self_short="${self_id:0:12}"
+            self_name="$(docker ps -a --filter "id=$self_id" --format '{{.Names}}' | head -n 1)"
+            self_ref="${self_name:-$self_id}"
+            local filtered=""
+            local skipped="false"
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                local id
+                id="$(printf '%s\n' "$line" | awk '{print $1}')"
+                if [ "$id" = "$self_id" ] || [ "$id" = "$self_short" ]; then
+                    skipped="true"
+                    continue
+                fi
+                filtered+="$line"$'\n'
+            done <<< "$matches"
+            matches="$(printf '%s' "$filtered" | sed '/^$/d')"
+            if [ "$skipped" = "true" ]; then
+                echo "Skipping current container ${self_ref}."
+            fi
+        fi
+    fi
+
+    if [ -z "$matches" ]; then
+        echo "No managed containers found."
+        return 0
+    fi
+
+    echo "Managed containers to remove:"
+    printf '  %s\n' "$matches"
+
+    if ! confirm_or_fail "Remove these managed containers?"; then
+        return 1
+    fi
+
+    if [ "$DRY_RUN" = "true" ]; then
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            local id
+            id="$(printf '%s\n' "$line" | awk '{print $1}')"
+            print_dry_run docker rm -f "$id"
+        done <<< "$matches"
+        return 0
+    fi
+
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        local id
+        id="$(printf '%s\n' "$line" | awk '{print $1}')"
+        docker rm -f "$id" >/dev/null 2>&1 || true
+    done <<< "$matches"
+    echo -e "${GREEN}Managed containers removed${NC}"
 }
 
 check_status() {
@@ -1654,16 +2000,20 @@ while [[ $# -gt 0 ]]; do
         --debug) DEBUG_MODE="true"; shift ;;
         --dry-run) DRY_RUN="true"; shift ;;
         --host-codex-dir) HOST_CODEX_DIR="true"; shift ;;
-        --allow-sudo) ALLOW_SUDO="true"; shift ;;
-        --allow-docker) ALLOW_DOCKER="true"; shift ;;
+        --allow-sudo) ALLOW_SUDO="true"; ALLOW_SUDO_EXPLICIT="true"; shift ;;
+        --allow-docker) ALLOW_DOCKER="true"; ALLOW_DOCKER_EXPLICIT="true"; shift ;;
         --persist-ssh) PERSIST_SSH="true"; shift ;;
         --seed-known-hosts) SEED_KNOWN_HOSTS+=( "$2" ); PERSIST_SSH="true"; shift 2 ;;
         --ephemeral) EPHEMERAL="true"; shift ;;
         --session) EPHEMERAL="true"; shift ;;
         --auto-cleanup) AUTO_CLEANUP="true"; shift ;;
+        --label) EXTRA_LABELS+=( "$2" ); shift 2 ;;
         --recreate) RECREATE_CONTAINER="true"; shift ;;
         --last) USE_LAST_CONTAINER="true"; shift ;;
         --yes) PRUNE_YES="true"; shift ;;
+        --all) CLEAN_ALL="true"; shift ;;
+        --force) FORCE_ALL="true"; shift ;;
+        --include-self) INCLUDE_SELF="true"; shift ;;
         --agent-docker) AGENT_DOCKER="true"; shift ;;
         --agent-image) AGENT_IMAGE_NAME="$2"; shift 2 ;;
         --agent-shell) AGENT_SHELL="true"; shift ;;
@@ -1695,7 +2045,7 @@ while [[ $# -gt 0 ]]; do
         --node) ACTION="node"; NODE_FILE="$2"; shift 2 ;;
         --npx) ACTION="npx"; shift; NPX_ARGS=( "$@" ); break ;;
         --codex) ACTION="codex"; shift; CODEX_ARGS=( "$@" ); break ;;
-        start|stop|rm|status|doctor|shell|logs|clean|prune-images)
+        start|stop|rm|status|doctor|shell|logs|clean|ps|prune-images)
             if [ "$ACTION" = "agent" ]; then
                 AGENT_COMMAND_ARGS=( "$@" )
                 break
@@ -1776,7 +2126,7 @@ fi
 
 # Validate workspace when needed
 case "$ACTION" in
-    build|clean|status|doctor|stop|rm|logs|prune-images)
+    build|clean|status|doctor|stop|rm|logs|ps|prune-images)
         ;;
     agent)
         if [ -z "$AGENT_WORKSPACE_DIR" ]; then
@@ -1846,9 +2196,14 @@ ensure_docker
 
 # Resolve container metadata for actions that need it
 case "$ACTION" in
-    build|prune-images)
+    build|prune-images|ps)
         ;;
-    clean|status|doctor|stop|rm|logs)
+    clean)
+        if [ "$CONTAINER_NAME_EXPLICIT" = "true" ] || [ "$USE_LAST_CONTAINER" = "true" ]; then
+            resolve_container_target
+        fi
+        ;;
+    status|doctor|stop|rm|logs)
         resolve_container_target
         ;;
     agent)
@@ -1878,6 +2233,16 @@ case "$ACTION" in
         ;;
     clean)
         clean_all
+        ;;
+    ps)
+        if [ "$CLEAN_ALL" = "true" ]; then
+            list_managed_containers "all"
+        else
+            if [ -z "$WORKSPACE_HASH" ]; then
+                fail "Workspace is required for ps. Use --workspace, set CODEX_WORKSPACE, or pass --all."
+            fi
+            list_managed_containers "workspace"
+        fi
         ;;
     prune-images)
         prune_images

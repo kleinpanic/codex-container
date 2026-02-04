@@ -16,6 +16,12 @@ container3="cc-smoke-docker-$smoke_id"
 container4=""
 smoke_git_name="Codex Container Smoke"
 smoke_git_email="smoke@example.invalid"
+smoke_debug_args=()
+smoke_label="io.codex-container.smoke_id=$smoke_id"
+
+if [ "${SMOKE_DEBUG:-}" = "1" ]; then
+    smoke_debug_args=(--debug)
+fi
 
 export CODEX_GIT_NAME="$smoke_git_name"
 export CODEX_GIT_EMAIL="$smoke_git_email"
@@ -76,7 +82,7 @@ start_runtime_container() {
     local -a args=()
     local output=""
 
-    args+=( "$codex" --debug -w "$workspace" --name "$name" )
+    args+=( "$codex" "${smoke_debug_args[@]}" -w "$workspace" --name "$name" --label "$smoke_label" )
     if [ "$allow_sudo" = "true" ]; then
         args+=( --allow-sudo )
     fi
@@ -135,6 +141,9 @@ dump_smoke_diagnostics() {
 }
 
 cleanup() {
+    if [ -n "$smoke_label" ]; then
+        "$codex" --label "$smoke_label" clean --all --yes >/dev/null 2>&1 || true
+    fi
     if [ -n "$container1" ]; then
         "$codex" --name "$container1" rm >/dev/null 2>&1 || true
     fi
@@ -171,9 +180,28 @@ if ! wait_for_container_running "$container1" 10 || ! wait_for_container_running
     exit 1
 fi
 
+echo "Name collision check (expected failure)..."
+set +e
+collision_output="$("$codex" -w "$workspace2" --name "$container1" --label "$smoke_label" start 2>&1)"
+collision_status=$?
+set -e
+if [ "$collision_status" -eq 0 ]; then
+    echo "Expected name collision to fail" >&2
+    printf '%s\n' "$collision_output" >&2
+    dump_smoke_diagnostics
+    exit 1
+fi
+if ! printf '%s\n' "$collision_output" | grep -F -q "Container name collision"; then
+    echo "Expected name collision error message" >&2
+    printf '%s\n' "$collision_output" >&2
+    dump_smoke_diagnostics
+    exit 1
+fi
+echo "Name collision check (expected failure): ok"
+
 echo "Lifecycle regression check..."
 pushd "$workspace3" >/dev/null
-if ! "$codex" start >/dev/null 2>&1; then
+if ! "$codex" "${smoke_debug_args[@]}" --label "$smoke_label" start >/dev/null 2>&1; then
     echo "Failed to start lifecycle container in $workspace3" >&2
     dump_smoke_diagnostics
     exit 1
@@ -193,7 +221,7 @@ if ! wait_for_container_running "$container4" 10; then
     exit 1
 fi
 
-"$codex" -w "$workspace1" --name "$container1" start >/dev/null 2>&1 || true
+"$codex" -w "$workspace1" --name "$container1" --label "$smoke_label" start >/dev/null 2>&1 || true
 
 pushd "$workspace3" >/dev/null
 if ! "$codex" status >/dev/null 2>&1; then
@@ -221,15 +249,15 @@ fi
 
 echo "Exec whoami..."
 "$codex" -w "$workspace1" --name "$container1" exec -- whoami >/dev/null
-"$codex" -w "$workspace2" --name "$container2" exec -- whoami >/dev/null
+"$codex" -w "$workspace2" --name "$container2" --allow-sudo exec -- whoami >/dev/null
 
 echo "Persistence check (workspace1)..."
 "$codex" -w "$workspace1" --name "$container1" exec -- sh -lc 'echo hi > /tmp/persist-test-a && cat /tmp/persist-test-a' >/dev/null
 "$codex" -w "$workspace1" --name "$container1" exec -- cat /tmp/persist-test-a >/dev/null
 
 echo "Persistence check (workspace2)..."
-"$codex" -w "$workspace2" --name "$container2" exec -- sh -lc 'echo hi > /tmp/persist-test-b && cat /tmp/persist-test-b' >/dev/null
-"$codex" -w "$workspace2" --name "$container2" exec -- cat /tmp/persist-test-b >/dev/null
+"$codex" -w "$workspace2" --name "$container2" --allow-sudo exec -- sh -lc 'echo hi > /tmp/persist-test-b && cat /tmp/persist-test-b' >/dev/null
+"$codex" -w "$workspace2" --name "$container2" --allow-sudo exec -- cat /tmp/persist-test-b >/dev/null
 
 echo "pipx check (informational)..."
 if "$codex" -w "$workspace1" --name "$container1" pipx list >/dev/null 2>&1; then
@@ -308,11 +336,11 @@ if "$codex" -w "$workspace1" --name "$container1" exec -- sudo -n true >/dev/nul
     echo "Expected sudo to be blocked in default container" >&2
     exit 1
 fi
-if ! "$codex" -w "$workspace2" --name "$container2" exec -- sudo -n true >/dev/null 2>&1; then
+if ! "$codex" -w "$workspace2" --name "$container2" --allow-sudo exec -- sudo -n true >/dev/null 2>&1; then
     echo "Expected sudo to be enabled in allow-sudo container" >&2
     exit 1
 fi
-"$codex" -w "$workspace2" --name "$container2" exec -- sudo apk add --no-cache jq >/dev/null
+"$codex" -w "$workspace2" --name "$container2" --allow-sudo exec -- sudo apk add --no-cache jq >/dev/null
 
 if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; then
     echo "SSH agent forwarding check..."
@@ -324,6 +352,15 @@ fi
 
 echo "Runtime docker socket check..."
 start_runtime_container "$container3" "$workspace1" "false" "true"
-"$codex" -w "$workspace1" --name "$container3" exec -- sh -lc 'docker version >/dev/null && docker ps >/dev/null'
+"$codex" -w "$workspace1" --name "$container3" --allow-docker exec -- sh -lc 'docker version >/dev/null && docker ps >/dev/null'
+
+echo "Smoke cleanup (label)..."
+"$codex" --label "$smoke_label" clean --all --yes >/dev/null 2>&1 || true
+remaining="$(docker ps -a --filter "label=$smoke_label" --format '{{.ID}}')"
+if [ -n "$remaining" ]; then
+    echo "Expected no containers with smoke label after cleanup: $smoke_label" >&2
+    docker ps -a --filter "label=$smoke_label" --format 'table {{.ID}}\t{{.Names}}\t{{.Status}}' >&2 || true
+    exit 1
+fi
 
 echo "Smoke tests passed"
