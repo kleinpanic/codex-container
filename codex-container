@@ -192,6 +192,25 @@ abs_path() {
     fi
 }
 
+resolve_host_ssh_auth_sock() {
+    if [ -n "${CODEX_HOST_SSH_AUTH_SOCK:-}" ]; then
+        echo "$CODEX_HOST_SSH_AUTH_SOCK"
+        return
+    fi
+    if [ -n "${SSH_AUTH_SOCK:-}" ]; then
+        echo "$SSH_AUTH_SOCK"
+        return
+    fi
+}
+
+host_ssh_sock_source() {
+    if [ -n "${CODEX_HOST_SSH_AUTH_SOCK:-}" ]; then
+        echo "codex_host_env"
+    else
+        echo "ssh_auth_sock"
+    fi
+}
+
 hash_path() {
     local input="$1"
     if command -v sha256sum >/dev/null 2>&1; then
@@ -779,6 +798,7 @@ ${YELLOW}ENVIRONMENT VARIABLES:${NC}
     ${CYAN}CODEX_HOST_PWD${NC}         Host working directory (passed into container)
     ${CYAN}CODEX_HOST_WORKSPACE${NC}   Host workspace root path (passed into container)
     ${CYAN}CODEX_HOST_RELATIVE${NC}    Host relative path within workspace (passed into container)
+    ${CYAN}CODEX_HOST_SSH_AUTH_SOCK${NC}  Host SSH agent socket path (used for nested Docker)
     ${CYAN}CODEX_SSH_PERSIST${NC}      Persist /home/codex/.ssh to /config/ssh (true/false)
     ${CYAN}CODEX_SSH_SEED_HOSTS${NC}   Comma-separated hosts to seed into known_hosts
 
@@ -904,9 +924,16 @@ runtime_docker_args() {
         chmod 755 "$HOME/.codex" 2>/dev/null || true
         args+=( -v "$HOME/.codex:/home/codex/.codex" )
     fi
-    if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; then
-        args+=( -v "$SSH_AUTH_SOCK:/ssh-agent" )
-        args+=( -e "SSH_AUTH_SOCK=/ssh-agent" )
+    local host_sock
+    host_sock="$(resolve_host_ssh_auth_sock || true)"
+    local sock_source
+    sock_source="$(host_ssh_sock_source)"
+    if [ -n "$host_sock" ]; then
+        if [ "$sock_source" = "codex_host_env" ] || [ -S "$host_sock" ]; then
+            args+=( -v "$host_sock:$host_sock" )
+            args+=( -e "SSH_AUTH_SOCK=$host_sock" )
+            args+=( -e "CODEX_HOST_SSH_AUTH_SOCK=$host_sock" )
+        fi
     fi
     if [ "$PERSIST_SSH" = "true" ]; then
         args+=( -e "CODEX_SSH_PERSIST=true" )
@@ -1015,9 +1042,15 @@ start_container() {
 
     print_startup_info
 
-    if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+    local host_sock
+    host_sock="$(resolve_host_ssh_auth_sock || true)"
+    local sock_source
+    sock_source="$(host_ssh_sock_source)"
+    if [ -z "$host_sock" ]; then
         warn "SSH agent not detected (SSH_AUTH_SOCK not set). Start your agent and run: ssh-add ~/.ssh/<key>."
-    elif [ ! -S "${SSH_AUTH_SOCK:-}" ]; then
+    elif [ "$sock_source" = "codex_host_env" ] && [ ! -S "$host_sock" ]; then
+        warn "SSH agent socket provided via CODEX_HOST_SSH_AUTH_SOCK; unable to verify locally."
+    elif [ ! -S "$host_sock" ]; then
         warn "SSH_AUTH_SOCK is set but is not a socket. Agent forwarding will be disabled."
     fi
     if [ "$ALLOW_DOCKER" = "true" ]; then
@@ -1145,12 +1178,17 @@ show_logs() {
 doctor() {
     echo -e "${CYAN}Codex Container Doctor:${NC}"
 
-    local host_sock="${SSH_AUTH_SOCK:-}"
+    local host_sock
+    host_sock="$(resolve_host_ssh_auth_sock || true)"
+    local sock_source
+    sock_source="$(host_ssh_sock_source)"
     local host_sock_ok="false"
     if [ -n "$host_sock" ]; then
         if [ -S "$host_sock" ]; then
             echo -e "  Host SSH_AUTH_SOCK: ${BLUE}${host_sock}${NC} (socket: ${GREEN}yes${NC})"
             host_sock_ok="true"
+        elif [ "$sock_source" = "codex_host_env" ]; then
+            echo -e "  Host SSH_AUTH_SOCK: ${BLUE}${host_sock}${NC} (socket: ${YELLOW}unknown${NC})"
         else
             echo -e "  Host SSH_AUTH_SOCK: ${BLUE}${host_sock}${NC} (socket: ${YELLOW}no${NC})"
         fi
@@ -1169,19 +1207,23 @@ doctor() {
     container_id="$(docker inspect -f '{{.Id}}' "$target_ref" 2>/dev/null || true)"
     echo -e "  Container: ${BLUE}$(format_container_ref "$CONTAINER_NAME" "$container_id")${NC}"
 
+    local expected_sock
+    expected_sock="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$target_ref" 2>/dev/null | awk -F= '$1=="SSH_AUTH_SOCK"{print $2; exit}')"
     local agent_mount
-    agent_mount="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/ssh-agent"}}yes{{end}}{{end}}' "$target_ref" 2>/dev/null || true)"
+    if [ -n "$expected_sock" ]; then
+        agent_mount="$(docker inspect -f "{{range .Mounts}}{{if eq .Destination \"$expected_sock\"}}yes{{end}}{{end}}" "$target_ref" 2>/dev/null || true)"
+    fi
     if [ -z "$agent_mount" ]; then
         agent_mount="no"
     fi
     if [ "$agent_mount" = "yes" ]; then
-        echo -e "  Container /ssh-agent mount: ${GREEN}yes${NC}"
+        echo -e "  Container SSH agent mount: ${GREEN}yes${NC}"
     else
-        echo -e "  Container /ssh-agent mount: ${YELLOW}no${NC}"
+        echo -e "  Container SSH agent mount: ${YELLOW}no${NC}"
     fi
 
     local config_sock
-    config_sock="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$target_ref" 2>/dev/null | awk -F= '$1=="SSH_AUTH_SOCK"{print $2; exit}')"
+    config_sock="$expected_sock"
     if [ -n "$config_sock" ]; then
         echo -e "  Container SSH_AUTH_SOCK (config): ${BLUE}${config_sock}${NC}"
     else
@@ -1226,9 +1268,13 @@ doctor() {
     fi
 
     if [ "$host_sock_ok" != "true" ]; then
-        echo "  Guidance: Host SSH_AUTH_SOCK is unavailable. Start ssh-agent and add keys, then recreate the container: $0 --recreate start"
+        if [ "$sock_source" = "codex_host_env" ]; then
+            echo "  Guidance: Host SSH_AUTH_SOCK path is provided but could not be verified here. Ensure the host agent is running, then recreate the container: $0 --recreate start"
+        else
+            echo "  Guidance: Host SSH_AUTH_SOCK is unavailable. Start ssh-agent and add keys, then recreate the container: $0 --recreate start"
+        fi
     elif [ "$agent_mount" != "yes" ]; then
-        echo "  Guidance: Container lacks /ssh-agent mount. Recreate the container after SSH_AUTH_SOCK is set on the host: $0 --recreate start"
+        echo "  Guidance: Container lacks the SSH agent mount. Recreate the container after SSH_AUTH_SOCK is set on the host: $0 --recreate start"
     elif [ "$runtime_socket" != "yes" ]; then
         echo "  Guidance: Container SSH_AUTH_SOCK is not a socket. Recreate the container and ensure the host agent is running: $0 --recreate start"
     else
@@ -1354,9 +1400,16 @@ run_agent_container() {
     env_args+=( -e "CODEX_CONFIG=$AGENT_CONFIG_DIR" )
     env_args+=( -e "HOME=/home/agent" )
 
-    if [ "$AGENT_SSH_AUTH_SOCK" = "true" ] || { [ "$AGENT_SSH_AUTH_SOCK" = "auto" ] && [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; }; then
-        vol_args+=( -v "$SSH_AUTH_SOCK:/ssh-agent" )
-        env_args+=( -e "SSH_AUTH_SOCK=/ssh-agent" )
+    local host_sock
+    host_sock="$(resolve_host_ssh_auth_sock || true)"
+    local sock_source
+    sock_source="$(host_ssh_sock_source)"
+    if [ "$AGENT_SSH_AUTH_SOCK" = "true" ] || { [ "$AGENT_SSH_AUTH_SOCK" = "auto" ] && [ -n "$host_sock" ]; }; then
+        if [ -n "$host_sock" ] && { [ "$sock_source" = "codex_host_env" ] || [ -S "$host_sock" ]; }; then
+            vol_args+=( -v "$host_sock:$host_sock" )
+            env_args+=( -e "SSH_AUTH_SOCK=$host_sock" )
+            env_args+=( -e "CODEX_HOST_SSH_AUTH_SOCK=$host_sock" )
+        fi
     fi
 
     for env in "${AGENT_ENV_ARRAY[@]}"; do
@@ -1437,9 +1490,16 @@ run_ephemeral_container() {
         done
     fi
 
-    if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; then
-        extra_volumes+=( -v "$SSH_AUTH_SOCK:/ssh-agent" )
-        env_args+=( -e "SSH_AUTH_SOCK=/ssh-agent" )
+    local host_sock
+    host_sock="$(resolve_host_ssh_auth_sock || true)"
+    local sock_source
+    sock_source="$(host_ssh_sock_source)"
+    if [ -n "$host_sock" ]; then
+        if [ "$sock_source" = "codex_host_env" ] || [ -S "$host_sock" ]; then
+            extra_volumes+=( -v "$host_sock:$host_sock" )
+            env_args+=( -e "SSH_AUTH_SOCK=$host_sock" )
+            env_args+=( -e "CODEX_HOST_SSH_AUTH_SOCK=$host_sock" )
+        fi
     fi
     if [ "$PERSIST_SSH" = "true" ]; then
         env_args+=( -e "CODEX_SSH_PERSIST=true" )
@@ -1913,6 +1973,12 @@ case "$ACTION" in
             run_ephemeral_container codex "${CODEX_ARGS[@]}"
         else
             start_container
+            if [ "$DEBUG_MODE" = "true" ]; then
+                echo -e "${MAGENTA}DEBUG: codex invocation:${NC}"
+                printf '%q ' codex "${CODEX_ARGS[@]}"
+                echo
+                echo
+            fi
             run_with_auto_cleanup exec_in_container codex "${CODEX_ARGS[@]}"
         fi
         ;;
