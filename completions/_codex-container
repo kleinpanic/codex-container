@@ -21,6 +21,10 @@ _arguments -s \
   '--persist-ssh[Persist /home/codex/.ssh to /config/ssh]' \
   '--seed-known-hosts[Seed known_hosts]:host:' \
   '--ephemeral[Run an ephemeral container]' \
+  '--session[Alias for --ephemeral]' \
+  '--auto-cleanup[Stop and remove container after session exits]' \
+  '--recreate[Recreate container if it already exists]' \
+  '--last[Target last-used container]' \
   '--debug[Print docker invocation]' \
   '--dry-run[Print docker commands without running them]' \
   '--yes[Auto-confirm prompts]' \

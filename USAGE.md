@@ -67,6 +67,13 @@ Start a runtime container:
 ./codex-container -w /path/to/project --name my-runtime start
 ```
 
+Start a session that cleans up automatically:
+
+```bash
+./codex-container --auto-cleanup shell
+./codex-container --session --search
+```
+
 Exec commands in the runtime container:
 
 ```bash
@@ -81,6 +88,10 @@ Sudo opt-in (runtime container only):
 ```
 
 `--allow-sudo` disables `no-new-privileges` for that runtime container and permits `sudo` inside it. If the container already exists, remove it and recreate with `--allow-sudo`.
+
+```bash
+./codex-container --allow-sudo --recreate start
+```
 
 Docker opt-in (runtime container only):
 
@@ -97,6 +108,12 @@ SSH agent forwarding and known_hosts:
 ssh-add -l
 ./codex-container start
 ./codex-container doctor
+```
+
+If the agent was not available when the container was created, recreate it after the agent is ready:
+
+```bash
+./codex-container --recreate start
 ```
 
 Optional persistence:
@@ -172,8 +189,14 @@ Container exists with different flags:
 - Remove and recreate the runtime container:
 
 ```bash
-./codex-container rm
-./codex-container start
+./codex-container --name <container> rm
+./codex-container --recreate start
+```
+
+Target the last-used container explicitly:
+
+```bash
+./codex-container --last status
 ```
 
 Check status/logs:
