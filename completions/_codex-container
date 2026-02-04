@@ -30,6 +30,7 @@ _arguments -s \
   '--dry-run[Print docker commands without running them]' \
   '--yes[Auto-confirm prompts]' \
   '--all[Clean all managed containers (requires --yes)]' \
+  '--force[Allow clean --all inside managed containers]' \
   '--include-self[Include the current container in clean targets]' \
   '(-h --help)'{-h,--help}'[Show help]' \
   '--version[Show version]' \

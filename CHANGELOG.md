@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.11 - 2026-02-04
+
+Summary:
+- Added `ps` to list managed containers for the current workspace (with `--all` support).
+- Improved multi-container guidance when more than one managed container matches a workspace.
+- Quieted smoke output by default and clarified the expected name-collision check.
+- Added a safety guard for `clean --all` when invoked from inside managed containers, with `--force` to override or `--label` to scope.
+
 ## 1.3.6 - 2026-02-04
 
 Summary:
