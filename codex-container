@@ -27,7 +27,7 @@ MAGENTA=$'\033[0;35m'
 NC=$'\033[0m' # No Color
 
 SCRIPT_DIR=""
-DEFAULT_VERSION="1.3.6"
+DEFAULT_VERSION="1.3.7"
 VERSION=""
 
 HOST_PWD="$(pwd -P)"
@@ -49,7 +49,7 @@ MANAGED_LABEL_CONFIG_DIR="io.codex-container.config_dir"
 MANAGED_LABEL_ALLOW_SUDO="io.codex-container.allow_sudo"
 MANAGED_LABEL_ALLOW_DOCKER="io.codex-container.allow_docker"
 WORKSPACE_EXPLICIT="false"
-PREFER_LAST_CONTAINER="false"
+USE_LAST_CONTAINER="false"
 CONTAINER_NAME_EXPLICIT="false"
 WORKSPACE_CLI_EXPLICIT="false"
 
@@ -63,6 +63,9 @@ DRY_RUN="false"
 PRUNE_YES="false"
 PERSIST_SSH="false"
 SEED_KNOWN_HOSTS=()
+RECREATE_CONTAINER="false"
+AUTO_CLEANUP="false"
+CONTAINER_CREATED="false"
 
 # Command payloads (argv-safe)
 ENV_ARRAY=()
@@ -236,20 +239,41 @@ format_container_ref() {
 }
 
 find_managed_containers() {
+    local include_config="${1:-true}"
     if [ -z "$WORKSPACE_HASH" ]; then
         return 1
     fi
     local -a filters=()
     filters+=( --filter "label=${MANAGED_LABEL_MANAGED}=true" )
     filters+=( --filter "label=${MANAGED_LABEL_WORKSPACE_HASH}=${WORKSPACE_HASH}" )
+    if [ "$include_config" = "true" ] && [ -n "$CONFIG_DIR" ]; then
+        filters+=( --filter "label=${MANAGED_LABEL_CONFIG_DIR}=${CONFIG_DIR}" )
+    fi
     docker ps -a "${filters[@]}" --format '{{.ID}} {{.Names}}'
+}
+
+fail_multiple_managed_containers() {
+    local matches="$1"
+    echo -e "${RED}Error:${NC} Multiple managed containers match this workspace."
+    echo "Candidates:"
+    printf '  %s\n' "$matches"
+    echo "Disambiguate with --name <container> or remove extra containers."
+    exit 1
 }
 
 resolve_managed_container() {
     local matches
-    matches="$(find_managed_containers 2>/dev/null || true)"
+    matches="$(find_managed_containers true 2>/dev/null || true)"
+    if [ -z "$matches" ]; then
+        matches="$(find_managed_containers false 2>/dev/null || true)"
+    fi
     if [ -z "$matches" ]; then
         return 1
+    fi
+    local count
+    count="$(printf '%s\n' "$matches" | wc -l | tr -d ' ')"
+    if [ "${count:-0}" -gt 1 ]; then
+        fail_multiple_managed_containers "$matches"
     fi
     local first
     first="$(printf '%s\n' "$matches" | head -n 1)"
@@ -257,11 +281,6 @@ resolve_managed_container() {
     local name
     id="$(printf '%s\n' "$first" | awk '{print $1}')"
     name="$(printf '%s\n' "$first" | awk '{print $2}')"
-    local count
-    count="$(printf '%s\n' "$matches" | wc -l | tr -d ' ')"
-    if [ "${count:-0}" -gt 1 ]; then
-        warn "Multiple managed containers found for workspace; using most recent: $name ($id)."
-    fi
     CONTAINER_ID="$id"
     CONTAINER_NAME="$name"
     return 0
@@ -276,8 +295,45 @@ resolve_container_target() {
         return
     fi
 
+    if [ "$USE_LAST_CONTAINER" = "true" ]; then
+        local last
+        last="$(get_last_container || true)"
+        if [ -n "$last" ]; then
+            warn "Using last container: $last"
+            CONTAINER_NAME="$last"
+            if container_exists "$CONTAINER_NAME"; then
+                CONTAINER_ID="$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+            fi
+            return
+        fi
+        fail "No last container recorded. Start a container first or use --workspace/--name."
+    fi
+
     if resolve_managed_container; then
         return
+    fi
+
+    if [ -n "$WORKSPACE_DIR" ]; then
+        if [ -z "$CONTAINER_NAME" ]; then
+            CONTAINER_NAME="$(default_container_name)"
+        fi
+        if container_exists "$CONTAINER_NAME"; then
+            CONTAINER_ID="$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+            return
+        fi
+    fi
+
+    if [ "$WORKSPACE_EXPLICIT" != "true" ]; then
+        local last
+        last="$(get_last_container || true)"
+        if [ -n "$last" ]; then
+            warn "No container found for this workspace. Falling back to last container: $last"
+            CONTAINER_NAME="$last"
+            if container_exists "$CONTAINER_NAME"; then
+                CONTAINER_ID="$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+            fi
+            return
+        fi
     fi
 
     if [ -z "$CONTAINER_NAME" ]; then
@@ -463,15 +519,6 @@ resolve_container_name() {
         echo "$CONTAINER_NAME"
         return
     fi
-    if [ "$PREFER_LAST_CONTAINER" = "true" ]; then
-        local last
-        last="$(get_last_container || true)"
-        if [ -n "$last" ]; then
-            warn "No workspace provided. Using last container: $last"
-            echo "$last"
-            return
-        fi
-    fi
     if [ -n "$WORKSPACE_DIR" ]; then
         default_container_name
         return
@@ -655,6 +702,10 @@ ${YELLOW}OPTIONS:${NC}
     ${CYAN}--persist-ssh${NC}               Persist /home/codex/.ssh to /config/ssh (keys not copied)
     ${CYAN}--seed-known-hosts <host>${NC}   Seed known_hosts (repeatable; implies --persist-ssh)
     ${CYAN}--ephemeral${NC}                 Run a one-shot container (legacy --rm behavior)
+    ${CYAN}--session${NC}                   Alias for --ephemeral
+    ${CYAN}--auto-cleanup${NC}              Stop and remove container after the session exits (if created now)
+    ${CYAN}--recreate${NC}                  Recreate the target container if it already exists
+    ${CYAN}--last${NC}                      Target the last-used container (management commands)
     ${CYAN}--debug${NC}                     Print resolved docker invocation (no secrets redacted)
     ${CYAN}--dry-run${NC}                   Print docker commands without running them
     ${CYAN}--yes${NC}                       Auto-confirm prompts (for prune-images)
@@ -896,10 +947,19 @@ start_container() {
     ensure_image
     create_config_dirs
 
+    CONTAINER_CREATED="false"
     resolve_container_target
     local target_ref
     target_ref="$(container_ref)"
     if container_exists "$target_ref"; then
+        local conflict
+        conflict="$(format_container_ref "$CONTAINER_NAME" "$CONTAINER_ID")"
+        if [ "$RECREATE_CONTAINER" = "true" ]; then
+            echo -e "${YELLOW}Recreating container: $conflict${NC}"
+            stop_container
+            remove_container
+            CONTAINER_ID=""
+        else
         local existing_allow
         existing_allow="$(get_container_label "$target_ref" "$MANAGED_LABEL_ALLOW_SUDO")"
         if [ -z "$existing_allow" ]; then
@@ -911,9 +971,8 @@ start_container() {
             existing_docker="$(get_container_label "$target_ref" "com.codex.allow_docker")"
         fi
         if [ "$ALLOW_SUDO" = "true" ] && [ "$existing_allow" = "false" ]; then
-            local conflict
-            conflict="$(format_container_ref "$CONTAINER_NAME" "$CONTAINER_ID")"
-            fail "Container exists without --allow-sudo: $conflict. Remove it with: $0 rm, then re-run: $0 --allow-sudo start"
+            local rm_cmd="$0 --name $CONTAINER_NAME rm"
+            fail "Container exists without --allow-sudo: $conflict. Remove it with: ${rm_cmd}, or re-run with --recreate: $0 --allow-sudo --recreate start"
         fi
         if [ "$ALLOW_SUDO" != "true" ] && [ "$existing_allow" = "true" ]; then
             warn "Container was created with --allow-sudo enabled."
@@ -922,9 +981,8 @@ start_container() {
             warn "Existing container missing allow-sudo label; proceeding without mismatch enforcement."
         fi
         if [ "$ALLOW_DOCKER" = "true" ] && [ "$existing_docker" = "false" ]; then
-            local conflict
-            conflict="$(format_container_ref "$CONTAINER_NAME" "$CONTAINER_ID")"
-            fail "Container exists without --allow-docker: $conflict. Remove it with: $0 rm, then re-run: $0 --allow-docker start"
+            local rm_cmd="$0 --name $CONTAINER_NAME rm"
+            fail "Container exists without --allow-docker: $conflict. Remove it with: ${rm_cmd}, or re-run with --recreate: $0 --allow-docker --recreate start"
         fi
         if [ "$ALLOW_DOCKER" != "true" ] && [ "$existing_docker" = "true" ]; then
             warn "Container was created with --allow-docker enabled."
@@ -938,6 +996,7 @@ start_container() {
         fi
         set_last_container "$CONTAINER_NAME"
         return
+        fi
     fi
 
     print_startup_info
@@ -967,6 +1026,7 @@ start_container() {
     fi
 
     docker run -d "${args[@]}" "$IMAGE_NAME" "${keepalive_cmd[@]}" >/dev/null
+    CONTAINER_CREATED="true"
     set_last_container "$CONTAINER_NAME"
     echo -e "${GREEN}Runtime container ready: ${CONTAINER_NAME}${NC}"
 }
@@ -991,6 +1051,30 @@ remove_container() {
         echo -e "${GREEN}Container removed${NC}"
     else
         warn "Container does not exist"
+    fi
+}
+
+cleanup_created_container() {
+    if [ "$AUTO_CLEANUP" != "true" ]; then
+        return
+    fi
+    if [ "$CONTAINER_CREATED" != "true" ]; then
+        return
+    fi
+    stop_container || true
+    remove_container || true
+    CONTAINER_CREATED="false"
+}
+
+run_with_auto_cleanup() {
+    local -a cmd=( "$@" )
+    if [ "$AUTO_CLEANUP" = "true" ] && [ "$CONTAINER_CREATED" = "true" ]; then
+        trap cleanup_created_container EXIT
+        "${cmd[@]}"
+        trap - EXIT
+        cleanup_created_container
+    else
+        "${cmd[@]}"
     fi
 }
 
@@ -1048,9 +1132,11 @@ doctor() {
     echo -e "${CYAN}Codex Container Doctor:${NC}"
 
     local host_sock="${SSH_AUTH_SOCK:-}"
+    local host_sock_ok="false"
     if [ -n "$host_sock" ]; then
         if [ -S "$host_sock" ]; then
             echo -e "  Host SSH_AUTH_SOCK: ${BLUE}${host_sock}${NC} (socket: ${GREEN}yes${NC})"
+            host_sock_ok="true"
         else
             echo -e "  Host SSH_AUTH_SOCK: ${BLUE}${host_sock}${NC} (socket: ${YELLOW}no${NC})"
         fi
@@ -1090,6 +1176,11 @@ doctor() {
 
     if ! container_running "$target_ref"; then
         echo -e "  Container running: ${YELLOW}no${NC} (runtime SSH checks skipped)"
+        if [ "$host_sock_ok" != "true" ]; then
+            echo "  Guidance: Start an SSH agent on the host and add keys (ssh-add). Then recreate the container with: $0 --recreate start"
+        elif [ "$agent_mount" != "yes" ]; then
+            echo "  Guidance: Container was created without SSH agent forwarding. Recreate it after the agent is ready: $0 --recreate start"
+        fi
         return 0
     fi
 
@@ -1118,6 +1209,20 @@ doctor() {
         done <<< "$agent_list"
     else
         printf '    %s\n' "<no output>"
+    fi
+
+    if [ "$host_sock_ok" != "true" ]; then
+        echo "  Guidance: Host SSH_AUTH_SOCK is unavailable. Start ssh-agent and add keys, then recreate the container: $0 --recreate start"
+    elif [ "$agent_mount" != "yes" ]; then
+        echo "  Guidance: Container lacks /ssh-agent mount. Recreate the container after SSH_AUTH_SOCK is set on the host: $0 --recreate start"
+    elif [ "$runtime_socket" != "yes" ]; then
+        echo "  Guidance: Container SSH_AUTH_SOCK is not a socket. Recreate the container and ensure the host agent is running: $0 --recreate start"
+    else
+        case "$agent_list" in
+            *"no identities"*|*"The agent has no identities"*)
+                echo "  Guidance: SSH agent is forwarded but has no identities. Run ssh-add on the host and retry."
+                ;;
+        esac
     fi
 }
 
@@ -1322,6 +1427,19 @@ run_ephemeral_container() {
         extra_volumes+=( -v "$SSH_AUTH_SOCK:/ssh-agent" )
         env_args+=( -e "SSH_AUTH_SOCK=/ssh-agent" )
     fi
+    if [ "$PERSIST_SSH" = "true" ]; then
+        env_args+=( -e "CODEX_SSH_PERSIST=true" )
+    fi
+    if [ "${#SEED_KNOWN_HOSTS[@]}" -gt 0 ]; then
+        local seed_hosts
+        seed_hosts="$(IFS=,; echo "${SEED_KNOWN_HOSTS[*]}")"
+        env_args+=( -e "CODEX_SSH_SEED_HOSTS=$seed_hosts" )
+    fi
+
+    if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; then
+        extra_volumes+=( -v "$SSH_AUTH_SOCK:/ssh-agent" )
+        env_args+=( -e "SSH_AUTH_SOCK=/ssh-agent" )
+    fi
 
     if [ "$ALLOW_DOCKER" = "true" ]; then
         warn "Enabling docker socket gives this container control of the host Docker daemon."
@@ -1467,6 +1585,10 @@ while [[ $# -gt 0 ]]; do
         --persist-ssh) PERSIST_SSH="true"; shift ;;
         --seed-known-hosts) SEED_KNOWN_HOSTS+=( "$2" ); PERSIST_SSH="true"; shift 2 ;;
         --ephemeral) EPHEMERAL="true"; shift ;;
+        --session) EPHEMERAL="true"; shift ;;
+        --auto-cleanup) AUTO_CLEANUP="true"; shift ;;
+        --recreate) RECREATE_CONTAINER="true"; shift ;;
+        --last) USE_LAST_CONTAINER="true"; shift ;;
         --yes) PRUNE_YES="true"; shift ;;
         --agent-docker) AGENT_DOCKER="true"; shift ;;
         --agent-image) AGENT_IMAGE_NAME="$2"; shift 2 ;;
@@ -1621,6 +1743,10 @@ case "$ACTION" in
         ;;
  esac
 
+if [ "$USE_LAST_CONTAINER" = "true" ] && { [ "$CONTAINER_NAME_EXPLICIT" = "true" ] || [ "$WORKSPACE_EXPLICIT" = "true" ]; }; then
+    fail "--last cannot be combined with --name or --workspace."
+fi
+
 # Autoload env file (when appropriate)
 autoload_env_file
 normalize_env_file
@@ -1638,16 +1764,6 @@ if [ -n "${OPENAI_API_KEY:-}" ]; then
     ENV_ARRAY+=("OPENAI_API_KEY=$OPENAI_API_KEY")
     AGENT_ENV_ARRAY+=("OPENAI_API_KEY=$OPENAI_API_KEY")
 fi
-
-# For management commands, prefer last container if workspace not explicitly set
-case "$ACTION" in
-    status|doctor|stop|rm|logs|clean)
-        if [ "$WORKSPACE_EXPLICIT" != "true" ] && [ -z "$CONTAINER_NAME" ]; then
-            PREFER_LAST_CONTAINER="true"
-            WORKSPACE_DIR=""
-        fi
-        ;;
-esac
 
 resolve_workspace_hash
 
@@ -1706,7 +1822,7 @@ case "$ACTION" in
             run_ephemeral_container bash
         else
             start_container
-            exec_in_container bash
+            run_with_auto_cleanup exec_in_container bash
         fi
         ;;
     exec)
@@ -1722,9 +1838,9 @@ case "$ACTION" in
         else
             start_container
             if [ -n "$EXEC_COMMAND_STRING" ]; then
-                exec_in_container bash -lc "$EXEC_COMMAND_STRING"
+                run_with_auto_cleanup exec_in_container bash -lc "$EXEC_COMMAND_STRING"
             else
-                exec_in_container "${EXEC_ARGS[@]}"
+                run_with_auto_cleanup exec_in_container "${EXEC_ARGS[@]}"
             fi
         fi
         ;;
@@ -1740,7 +1856,7 @@ case "$ACTION" in
             run_ephemeral_container npm "${NPM_ARGS[@]}"
         else
             start_container
-            exec_in_container npm "${NPM_ARGS[@]}"
+            run_with_auto_cleanup exec_in_container npm "${NPM_ARGS[@]}"
         fi
         ;;
     npx)
@@ -1748,7 +1864,7 @@ case "$ACTION" in
             run_ephemeral_container npx "${NPX_ARGS[@]}"
         else
             start_container
-            exec_in_container npx "${NPX_ARGS[@]}"
+            run_with_auto_cleanup exec_in_container npx "${NPX_ARGS[@]}"
         fi
         ;;
     node)
@@ -1759,7 +1875,7 @@ case "$ACTION" in
             run_ephemeral_container node "$NODE_FILE"
         else
             start_container
-            exec_in_container node "$NODE_FILE"
+            run_with_auto_cleanup exec_in_container node "$NODE_FILE"
         fi
         ;;
     pipx)
@@ -1767,7 +1883,7 @@ case "$ACTION" in
             run_ephemeral_container pipx "${PIPX_ARGS[@]}"
         else
             start_container
-            exec_in_container pipx "${PIPX_ARGS[@]}"
+            run_with_auto_cleanup exec_in_container pipx "${PIPX_ARGS[@]}"
         fi
         ;;
     mcp)
@@ -1775,7 +1891,7 @@ case "$ACTION" in
             run_ephemeral_container codex mcp "${MCP_ARGS[@]}"
         else
             start_container
-            exec_in_container codex mcp "${MCP_ARGS[@]}"
+            run_with_auto_cleanup exec_in_container codex mcp "${MCP_ARGS[@]}"
         fi
         ;;
     codex)
@@ -1783,7 +1899,7 @@ case "$ACTION" in
             run_ephemeral_container codex "${CODEX_ARGS[@]}"
         else
             start_container
-            exec_in_container codex "${CODEX_ARGS[@]}"
+            run_with_auto_cleanup exec_in_container codex "${CODEX_ARGS[@]}"
         fi
         ;;
     *)
@@ -1792,14 +1908,14 @@ case "$ACTION" in
                 run_ephemeral_container "${COMMAND_ARGS[@]}"
             else
                 start_container
-                exec_in_container "${COMMAND_ARGS[@]}"
+                run_with_auto_cleanup exec_in_container "${COMMAND_ARGS[@]}"
             fi
         else
             if [ "$EPHEMERAL" = "true" ]; then
                 run_ephemeral_container codex
             else
                 start_container
-                exec_in_container codex
+                run_with_auto_cleanup exec_in_container codex
             fi
         fi
         ;;
