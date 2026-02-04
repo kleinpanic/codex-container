@@ -90,6 +90,22 @@ Docker opt-in (runtime container only):
 
 Security warning: `--allow-docker` grants the container control of the host Docker daemon. Only enable it when you need it.
 
+SSH agent forwarding and known_hosts:
+
+```bash
+# On the host
+ssh-add -l
+./codex-container start
+./codex-container doctor
+```
+
+Optional persistence:
+
+```bash
+./codex-container --persist-ssh start
+./codex-container --seed-known-hosts github.com start
+```
+
 Codex invocation patterns:
 
 ```bash
@@ -165,4 +181,10 @@ Check status/logs:
 ```bash
 ./codex-container status
 ./codex-container logs
+```
+
+Debug SSH agent forwarding:
+
+```bash
+./codex-container doctor
 ```

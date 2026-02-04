@@ -285,6 +285,17 @@ If you don’t use this option, Codex state is persisted in `/config/codex` inst
 
 If `SSH_AUTH_SOCK` is set on the host, the wrapper forwards it into the container at `/ssh-agent` and sets `SSH_AUTH_SOCK` accordingly. If not set, the wrapper logs a warning but continues.
 
+Recommended workflow:
+
+1. Start the host agent and load your key (`ssh-add -l` should show it).
+2. Start the container.
+3. Run `codex-container doctor` to confirm the mount and `ssh-add -l` inside the container.
+
+Optional persistence:
+
+- `--persist-ssh` makes `/home/codex/.ssh` point to `/config/ssh` without copying private keys.
+- `--seed-known-hosts github.com` seeds `known_hosts` (repeatable; implies `--persist-ssh`).
+
 ---
 
 ## Git Identity Propagation
