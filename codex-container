@@ -238,6 +238,17 @@ format_container_ref() {
     fi
 }
 
+is_management_action() {
+    case "$ACTION" in
+        status|doctor|stop|rm|logs|clean)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 find_managed_containers() {
     local include_config="${1:-true}"
     if [ -z "$WORKSPACE_HASH" ]; then
@@ -296,6 +307,9 @@ resolve_container_target() {
     fi
 
     if [ "$USE_LAST_CONTAINER" = "true" ]; then
+        if ! is_management_action; then
+            fail "--last is only supported with management commands (status/doctor/stop/rm/logs/clean)."
+        fi
         local last
         last="$(get_last_container || true)"
         if [ -n "$last" ]; then
@@ -323,7 +337,7 @@ resolve_container_target() {
         fi
     fi
 
-    if [ "$WORKSPACE_EXPLICIT" != "true" ]; then
+    if [ "$WORKSPACE_EXPLICIT" != "true" ] && is_management_action; then
         local last
         last="$(get_last_container || true)"
         if [ -n "$last" ]; then

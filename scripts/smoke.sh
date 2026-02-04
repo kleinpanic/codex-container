@@ -56,11 +56,16 @@ hash_path() {
     printf '%s' "$input" | cksum | awk '{print $1}'
 }
 
-default_container_name() {
-    local path="$1"
+resolve_workspace_container() {
+    local workspace="$1"
+    local resolved
+    resolved="$(cd "$workspace" && pwd -P)"
     local hash
-    hash="$(hash_path "$path")"
-    echo "codex-container-${hash:0:12}"
+    hash="$(hash_path "$resolved")"
+    docker ps -a \
+        --filter "label=io.codex-container.managed=true" \
+        --filter "label=io.codex-container.workspace_hash=$hash" \
+        --format '{{.Names}}' | head -n 1
 }
 
 start_runtime_container() {
@@ -167,7 +172,6 @@ if ! wait_for_container_running "$container1" 10 || ! wait_for_container_running
 fi
 
 echo "Lifecycle regression check..."
-container4="$(default_container_name "$workspace3")"
 pushd "$workspace3" >/dev/null
 if ! "$codex" start >/dev/null 2>&1; then
     echo "Failed to start lifecycle container in $workspace3" >&2
@@ -175,6 +179,13 @@ if ! "$codex" start >/dev/null 2>&1; then
     exit 1
 fi
 popd >/dev/null
+
+container4="$(resolve_workspace_container "$workspace3")"
+if [ -z "$container4" ]; then
+    echo "Failed to resolve lifecycle container for workspace3" >&2
+    dump_smoke_diagnostics
+    exit 1
+fi
 
 if ! wait_for_container_running "$container4" 10; then
     echo "Expected lifecycle container to be running" >&2
