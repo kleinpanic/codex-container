@@ -6,12 +6,14 @@ codex="$root_dir/codex-container"
 
 workspace1="$(mktemp -d /tmp/codex-ws1.XXXXXX)"
 workspace2="$(mktemp -d /tmp/codex-ws2.XXXXXX)"
+workspace3="$(mktemp -d /tmp/codex-ws3.XXXXXX)"
 config_dir="$(mktemp -d /tmp/codex-config-smoke.XXXXXX)"
 chmod 777 "$config_dir"
 smoke_id="$(date +%s)-$$"
 container1="cc-smoke-1-$smoke_id"
 container2="cc-smoke-2-$smoke_id"
 container3="cc-smoke-docker-$smoke_id"
+container4=""
 smoke_git_name="Codex Container Smoke"
 smoke_git_email="smoke@example.invalid"
 
@@ -31,6 +33,39 @@ wait_for_container_running() {
         elapsed=$((elapsed + 1))
     done
     return 1
+}
+
+hash_path() {
+    local input="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$input" | sha256sum | awk '{print $1}'
+        return
+    fi
+    if command -v shasum >/dev/null 2>&1; then
+        printf '%s' "$input" | shasum -a 256 | awk '{print $1}'
+        return
+    fi
+    if command -v md5sum >/dev/null 2>&1; then
+        printf '%s' "$input" | md5sum | awk '{print $1}'
+        return
+    fi
+    if command -v md5 >/dev/null 2>&1; then
+        printf '%s' "$input" | md5 -q
+        return
+    fi
+    printf '%s' "$input" | cksum | awk '{print $1}'
+}
+
+resolve_workspace_container() {
+    local workspace="$1"
+    local resolved
+    resolved="$(cd "$workspace" && pwd -P)"
+    local hash
+    hash="$(hash_path "$resolved")"
+    docker ps -a \
+        --filter "label=io.codex-container.managed=true" \
+        --filter "label=io.codex-container.workspace_hash=$hash" \
+        --format '{{.Names}}' | head -n 1
 }
 
 start_runtime_container() {
@@ -109,7 +144,10 @@ cleanup() {
     if [ -n "$container3" ]; then
         "$codex" --name "$container3" rm >/dev/null 2>&1 || true
     fi
-    rm -rf "$workspace1" "$workspace2" "$config_dir"
+    if [ -n "$container4" ]; then
+        "$codex" --name "$container4" rm >/dev/null 2>&1 || true
+    fi
+    rm -rf "$workspace1" "$workspace2" "$workspace3" "$config_dir"
 }
 trap cleanup EXIT
 
@@ -129,6 +167,54 @@ fi
 
 if ! wait_for_container_running "$container1" 10 || ! wait_for_container_running "$container2" 10; then
     echo "Expected both containers to be running" >&2
+    dump_smoke_diagnostics
+    exit 1
+fi
+
+echo "Lifecycle regression check..."
+pushd "$workspace3" >/dev/null
+if ! "$codex" start >/dev/null 2>&1; then
+    echo "Failed to start lifecycle container in $workspace3" >&2
+    dump_smoke_diagnostics
+    exit 1
+fi
+popd >/dev/null
+
+container4="$(resolve_workspace_container "$workspace3")"
+if [ -z "$container4" ]; then
+    echo "Failed to resolve lifecycle container for workspace3" >&2
+    dump_smoke_diagnostics
+    exit 1
+fi
+
+if ! wait_for_container_running "$container4" 10; then
+    echo "Expected lifecycle container to be running" >&2
+    dump_smoke_diagnostics
+    exit 1
+fi
+
+"$codex" -w "$workspace1" --name "$container1" start >/dev/null 2>&1 || true
+
+pushd "$workspace3" >/dev/null
+if ! "$codex" status >/dev/null 2>&1; then
+    echo "Lifecycle status failed for workspace3" >&2
+    dump_smoke_diagnostics
+    exit 1
+fi
+if ! "$codex" stop >/dev/null 2>&1; then
+    echo "Lifecycle stop failed for workspace3" >&2
+    dump_smoke_diagnostics
+    exit 1
+fi
+if ! "$codex" rm >/dev/null 2>&1; then
+    echo "Lifecycle rm failed for workspace3" >&2
+    dump_smoke_diagnostics
+    exit 1
+fi
+popd >/dev/null
+
+if docker container inspect "$container4" >/dev/null 2>&1; then
+    echo "Expected lifecycle container to be removed: $container4" >&2
     dump_smoke_diagnostics
     exit 1
 fi

@@ -67,6 +67,13 @@ Start a runtime container:
 ./codex-container -w /path/to/project --name my-runtime start
 ```
 
+Start a session that cleans up automatically:
+
+```bash
+./codex-container --auto-cleanup shell
+./codex-container --session --search
+```
+
 Exec commands in the runtime container:
 
 ```bash
@@ -82,6 +89,10 @@ Sudo opt-in (runtime container only):
 
 `--allow-sudo` disables `no-new-privileges` for that runtime container and permits `sudo` inside it. If the container already exists, remove it and recreate with `--allow-sudo`.
 
+```bash
+./codex-container --allow-sudo --recreate start
+```
+
 Docker opt-in (runtime container only):
 
 ```bash
@@ -89,6 +100,30 @@ Docker opt-in (runtime container only):
 ```
 
 Security warning: `--allow-docker` grants the container control of the host Docker daemon. Only enable it when you need it.
+
+SSH agent forwarding and known_hosts:
+
+```bash
+# On the host
+ssh-add -l
+./codex-container start
+./codex-container doctor
+```
+
+If the agent was not available when the container was created, recreate it after the agent is ready:
+
+```bash
+./codex-container --recreate start
+```
+
+When Docker is used from inside another container, the wrapper exports `CODEX_HOST_SSH_AUTH_SOCK` so nested runs can still bind the host agent socket.
+
+Optional persistence:
+
+```bash
+./codex-container --persist-ssh start
+./codex-container --seed-known-hosts github.com start
+```
 
 Codex invocation patterns:
 
@@ -102,6 +137,8 @@ Codex invocation patterns:
 # Explicit flag
 ./codex-container --codex --search
 ```
+
+`--full-auto` is forwarded to the Codex CLI, but approvals may still appear depending on your Codex configuration. Use `--debug` to see the resolved codex invocation.
 
 Agent mode (Docker socket passthrough):
 
@@ -156,8 +193,14 @@ Container exists with different flags:
 - Remove and recreate the runtime container:
 
 ```bash
-./codex-container rm
-./codex-container start
+./codex-container --name <container> rm
+./codex-container --recreate start
+```
+
+Target the last-used container explicitly:
+
+```bash
+./codex-container --last status
 ```
 
 Check status/logs:
@@ -165,4 +208,10 @@ Check status/logs:
 ```bash
 ./codex-container status
 ./codex-container logs
+```
+
+Debug SSH agent forwarding:
+
+```bash
+./codex-container doctor
 ```

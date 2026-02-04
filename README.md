@@ -127,6 +127,9 @@ command -v codex-container
 # Show status for the current workspace container
 ./codex-container status
 
+# Target the last-used container explicitly
+./codex-container --last status
+
 # Prune old codex-container images (keeps current VERSION tag)
 ./codex-container prune-images
 ```
@@ -147,6 +150,8 @@ command -v codex-container
 # Use a custom env file
 ./codex-container --env-file /path/to/.env --search
 ```
+
+Note: `--full-auto` is passed through to the Codex CLI, but approvals can still be required depending on your Codex settings and policy configuration. Use `--debug` to see the resolved codex invocation.
 
 ### Shell / tools
 
@@ -188,6 +193,13 @@ command -v codex-container
 ```bash
 ./codex-container --ephemeral --search
 ./codex-container --ephemeral shell
+./codex-container --session --search
+```
+
+### Auto-cleanup sessions
+
+```bash
+./codex-container --auto-cleanup shell
 ```
 
 ### Agent container mode (Docker socket passthrough)
@@ -224,7 +236,11 @@ To opt into sudo for a specific runtime container:
 ./codex-container --allow-sudo start
 ```
 
-If a container already exists without sudo, remove it and recreate with `--allow-sudo`.
+If a container already exists without sudo, remove it and recreate with `--allow-sudo`:
+
+```bash
+./codex-container --allow-sudo --recreate start
+```
 
 Runtime Docker socket access is disabled by default. If you enable `--allow-docker`, the runtime container can control the host Docker daemon.
 
@@ -283,7 +299,26 @@ If you don’t use this option, Codex state is persisted in `/config/codex` inst
 
 ## SSH Agent Forwarding
 
-If `SSH_AUTH_SOCK` is set on the host, the wrapper forwards it into the container at `/ssh-agent` and sets `SSH_AUTH_SOCK` accordingly. If not set, the wrapper logs a warning but continues.
+If `SSH_AUTH_SOCK` is set on the host, the wrapper forwards it into the container at the same absolute path and sets `SSH_AUTH_SOCK` accordingly. If not set, the wrapper logs a warning but continues.
+
+Recommended workflow:
+
+1. Start the host agent and load your key (`ssh-add -l` should show it).
+2. Start the container.
+3. Run `codex-container doctor` to confirm the mount and `ssh-add -l` inside the container.
+
+If the agent was not available when the container was created, recreate it:
+
+```bash
+./codex-container --recreate start
+```
+
+For nested Docker usage, the wrapper exports `CODEX_HOST_SSH_AUTH_SOCK` so that containers created from inside other containers can still bind the host agent socket.
+
+Optional persistence:
+
+- `--persist-ssh` makes `/home/codex/.ssh` point to `/config/ssh` without copying private keys.
+- `--seed-known-hosts github.com` seeds `known_hosts` (repeatable; implies `--persist-ssh`).
 
 ---
 
@@ -351,6 +386,7 @@ These are wrapper controls and passthrough helpers:
 - `CODEX_HOST_PWD` — your host working directory
 - `CODEX_HOST_WORKSPACE` — resolved host workspace root
 - `CODEX_HOST_RELATIVE` — host subdirectory relative to workspace (used to set container workdir)
+- `CODEX_HOST_SSH_AUTH_SOCK` — host SSH agent socket path (for nested Docker usage)
 
 ---
 

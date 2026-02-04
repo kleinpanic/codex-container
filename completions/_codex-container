@@ -18,11 +18,17 @@ _arguments -s \
   '--host-codex-dir[Mount host ~/.codex into runtime container]' \
   '--allow-sudo[Allow sudo/apk in runtime container]' \
   '--allow-docker[Allow runtime container access to host Docker socket]' \
+  '--persist-ssh[Persist /home/codex/.ssh to /config/ssh]' \
+  '--seed-known-hosts[Seed known_hosts]:host:' \
   '--ephemeral[Run an ephemeral container]' \
+  '--session[Alias for --ephemeral]' \
+  '--auto-cleanup[Stop and remove container after session exits]' \
+  '--recreate[Recreate container if it already exists]' \
+  '--last[Target last-used container]' \
   '--debug[Print docker invocation]' \
   '--dry-run[Print docker commands without running them]' \
   '--yes[Auto-confirm prompts]' \
   '(-h --help)'{-h,--help}'[Show help]' \
   '--version[Show version]' \
-  '1:subcommand:(start stop rm status shell exec logs agent clean prune-images)' \
+  '1:subcommand:(start stop rm status doctor shell exec logs agent clean prune-images)' \
   '*::args:->args'

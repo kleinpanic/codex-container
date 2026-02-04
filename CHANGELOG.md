@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.6 - 2026-02-04
+
+Summary:
+- Fixed workspace container targeting by resolving containers via labels and container IDs.
+- Added `doctor` for SSH agent diagnostics and improved forwarding warnings.
+- Added optional SSH persistence and known_hosts seeding.
+
 ## 1.3.5 - 2026-02-03
 
 Summary:
